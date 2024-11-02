@@ -7,7 +7,7 @@ use core_foundation::runloop::{
     CFRunLoopSourceSignal, CFRunLoopWakeUp,
 };
 use crossbeam::channel::{self, Receiver, Sender};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2_foundation::NSThread;
 use std::os::raw::c_void;
 use std::sync::Weak;
 
@@ -113,7 +113,7 @@ where
     }
 
     fn is_main_thread(&self) -> bool {
-        unsafe { msg_send![class!(NSThread), isMainThread] }
+        NSThread::isMainThread_class()
     }
 }
 
