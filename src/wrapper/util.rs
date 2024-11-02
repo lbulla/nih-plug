@@ -1,4 +1,5 @@
 use backtrace::Backtrace;
+use std::arch::asm;
 use std::cmp;
 use std::marker::PhantomData;
 use std::os::raw::c_char;
@@ -207,14 +208,10 @@ impl ScopedFtz {
         {
             #[cfg(target_feature = "sse")]
             {
-                let mode = unsafe { std::arch::x86_64::_MM_GET_FLUSH_ZERO_MODE() };
+                let mode = unsafe { Self::get_flush_zero_mode() };
                 let should_disable_again = mode != std::arch::x86_64::_MM_FLUSH_ZERO_ON;
                 if should_disable_again {
-                    unsafe {
-                        std::arch::x86_64::_MM_SET_FLUSH_ZERO_MODE(
-                            std::arch::x86_64::_MM_FLUSH_ZERO_ON,
-                        )
-                    };
+                    unsafe { Self::set_flush_zero_mode(std::arch::x86_64::_MM_FLUSH_ZERO_ON) };
                 }
 
                 return Self {
@@ -229,11 +226,11 @@ impl ScopedFtz {
                 // requires inline assembly:
                 // https://developer.arm.com/documentation/ddi0595/2021-06/AArch64-Registers/FPCR--Floating-point-Control-Register
                 let mut fpcr: u64;
-                unsafe { std::arch::asm!("mrs {}, fpcr", out(reg) fpcr) };
+                unsafe { asm!("mrs {}, fpcr", out(reg) fpcr) };
 
                 let should_disable_again = fpcr & AARCH64_FTZ_BIT == 0;
                 if should_disable_again {
-                    unsafe { std::arch::asm!("msr fpcr, {}", in(reg) fpcr | AARCH64_FTZ_BIT) };
+                    unsafe { asm!("msr fpcr, {}", in(reg) fpcr | AARCH64_FTZ_BIT) };
                 }
 
                 return Self {
@@ -249,6 +246,37 @@ impl ScopedFtz {
             _send_sync_marker: PhantomData,
         }
     }
+
+    #[cfg(target_feature = "sse")]
+    unsafe fn get_flush_zero_mode() -> u32 {
+        Self::_mm_getcsr() & std::arch::x86_64::_MM_FLUSH_ZERO_MASK
+    }
+
+    #[cfg(target_feature = "sse")]
+    unsafe fn set_flush_zero_mode(x: u32) {
+        let val = (Self::_mm_getcsr() & !std::arch::x86_64::_MM_FLUSH_ZERO_MASK) | x;
+        Self::_mm_setcsr(val);
+    }
+
+    #[cfg(target_feature = "sse")]
+    unsafe fn _mm_getcsr() -> u32 {
+        let mut result = 0i32;
+        let mut _result_ptr = &raw mut result as *mut i8;
+        asm!(
+            "stmxcsr [{0}]",
+            out(xmm_reg) _result_ptr,
+        );
+        result as _
+    }
+
+    #[cfg(target_feature = "sse")]
+    unsafe fn _mm_setcsr(val: u32) {
+        let val_ptr = &raw const val as *const i8;
+        asm!(
+            "ldmxcsr [{0}]",
+            in(xmm_reg) val_ptr,
+        );
+    }
 }
 
 impl Drop for ScopedFtz {
@@ -257,11 +285,7 @@ impl Drop for ScopedFtz {
         if self.should_disable_again {
             #[cfg(target_feature = "sse")]
             {
-                unsafe {
-                    std::arch::x86_64::_MM_SET_FLUSH_ZERO_MODE(
-                        std::arch::x86_64::_MM_FLUSH_ZERO_OFF,
-                    )
-                };
+                unsafe { set_flush_zero_mode(std::arch::x86_64::_MM_FLUSH_ZERO_OFF) };
             }
 
             #[cfg(target_arch = "aarch64")]
