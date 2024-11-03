@@ -127,7 +127,7 @@ impl Plugin for Gain {
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
             let mut amplitude = 0.0;
-            let num_samples = channel_samples.len();
+            let num_channels = channel_samples.len();
 
             let gain = self.params.gain.smoothed.next();
             for sample in channel_samples {
@@ -138,7 +138,7 @@ impl Plugin for Gain {
             // To save resources, a plugin can (and probably should!) only perform expensive
             // calculations that are only displayed on the GUI while the GUI is open
             if self.params.editor_state.is_open() {
-                amplitude = (amplitude / num_samples as f32).abs();
+                amplitude = (amplitude / num_channels as f32).abs();
                 let current_peak_meter = self.peak_meter.load(std::sync::atomic::Ordering::Relaxed);
                 let new_peak_meter = if amplitude > current_peak_meter {
                     amplitude
