@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use util::install_plugin;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -17,13 +18,17 @@ pub use anyhow::Result;
 fn build_usage_string(command_name: &str) -> String {
     format!(
         "Usage:
-  {command_name} bundle <package> [--release]
-  {command_name} bundle -p <package1> -p <package2> ... [--release]
+  {command_name} bundle <package> [--install] [--release]
+  {command_name} bundle -p <package1> -p <package2> ... [--install] [--release]
 
-  {command_name} bundle-universal <package> [--release]  (macOS only)
-  {command_name} bundle-universal -p <package1> -p <package2> ... [--release]  (macOS only)
+  {command_name} bundle-universal <package> [--install] [--release]  (macOS only)
+  {command_name} bundle-universal -p <package1> -p <package2> ... [--install] [--release]  (macOS \
+         only)
 
-  All other 'cargo build' options are supported, including '--target' and '--profile'."
+  All other 'cargo build' options are supported, including '--target' and '--profile'.
+  Additionally, the option '--install' can be used directly after the packages to install the \
+         plugins into their default directories (see 'util::PluginInstallPaths'). Not supported \
+         for standalone."
     )
 }
 
@@ -65,6 +70,12 @@ pub enum BundleType {
     Binary,
 }
 
+pub enum PluginType {
+    Clap,
+    Vst2,
+    Vst3,
+}
+
 /// The main xtask entry point function. See the readme for instructions on how to use this.
 pub fn main() -> Result<()> {
     let args = std::env::args().skip(1);
@@ -93,14 +104,14 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
             // cargo build, but you can also build a single package without specifying `-p`. Since
             // multiple packages can be built in parallel if we pass all of these flags to a single
             // `cargo build` we'll first build all of these packages and only then bundle them.
-            let (packages, other_args) = split_bundle_args(args, &usage_string)?;
+            let (packages, install, other_args) = split_bundle_args(args, &usage_string)?;
 
             // As explained above, for efficiency's sake this is a two step process
             build(&packages, &other_args)?;
 
-            bundle(target_dir, &packages[0], &other_args, false)?;
+            bundle(target_dir, &packages[0], &other_args, false, install)?;
             for package in packages.into_iter().skip(1) {
-                bundle(target_dir, &package, &other_args, false)?;
+                bundle(target_dir, &package, &other_args, false, install)?;
             }
 
             Ok(())
@@ -109,7 +120,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
             // The same as `--bundle`, but builds universal binaries for macOS Cargo will also error
             // out on duplicate `--target` options, but it seems like a good idea to preemptively
             // abort the bundling process if that happens
-            let (packages, other_args) = split_bundle_args(args, &usage_string)?;
+            let (packages, install, other_args) = split_bundle_args(args, &usage_string)?;
 
             for arg in &other_args {
                 if arg == "--target" || arg.starts_with("--target=") {
@@ -136,9 +147,9 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
 
             // This `true` indicates a universal build. This will cause the two sets of built
             // binaries to beq lipo'd together into universal binaries before bundling
-            bundle(target_dir, &packages[0], &other_args, true)?;
+            bundle(target_dir, &packages[0], &other_args, true, install)?;
             for package in packages.into_iter().skip(1) {
-                bundle(target_dir, &package, &other_args, true)?;
+                bundle(target_dir, &package, &other_args, true, install)?;
             }
 
             Ok(())
@@ -216,7 +227,13 @@ pub fn build(packages: &[String], args: &[String]) -> Result<()> {
 /// Normally this respects the `--target` option for cross compilation. If the `universal` option is
 /// specified instead, then this will assume both `x86_64-apple-darwin` and `aarch64-apple-darwin`
 /// have been built and it will try to lipo those together instead.
-pub fn bundle(target_dir: &Path, package: &str, args: &[String], universal: bool) -> Result<()> {
+pub fn bundle(
+    target_dir: &Path,
+    package: &str,
+    args: &[String],
+    universal: bool,
+    install: bool,
+) -> Result<()> {
     let mut build_type_dir = "debug";
     let mut cross_compile_target: Option<String> = None;
     for arg_idx in (0..args.len()).rev() {
@@ -297,6 +314,7 @@ pub fn bundle(target_dir: &Path, package: &str, args: &[String], universal: bool
                 package,
                 &[&x86_64_lib_path, &aarch64_lib_path],
                 CompilationTarget::MacOSUniversal,
+                install,
             )?;
         }
     } else {
@@ -324,7 +342,13 @@ to your Cargo.toml file?"#,
             bundle_binary(target_dir, package, &[&bin_path], compilation_target)?;
         }
         if lib_path.exists() {
-            bundle_plugin(target_dir, package, &[&lib_path], compilation_target)?;
+            bundle_plugin(
+                target_dir,
+                package,
+                &[&lib_path],
+                compilation_target,
+                install,
+            )?;
         }
     }
 
@@ -403,6 +427,7 @@ fn bundle_plugin(
     package: &str,
     lib_paths: &[&Path],
     compilation_target: CompilationTarget,
+    install: bool,
 ) -> Result<()> {
     let bundle_home_dir = bundle_home(target_dir);
     let bundle_name = match load_bundler_config()?.and_then(|c| c.get(package).cloned()) {
@@ -455,6 +480,15 @@ fn bundle_plugin(
         maybe_codesign(&clap_bundle_home, compilation_target);
 
         eprintln!("Created a CLAP bundle at '{}'", clap_bundle_home.display());
+
+        if install {
+            install_plugin(
+                &bundle_name,
+                &clap_bundle_home,
+                PluginType::Clap,
+                compilation_target,
+            );
+        }
     }
     if bundle_vst2 {
         let vst2_bundle_library_name = vst2_bundle_library_name(&bundle_name, compilation_target);
@@ -483,6 +517,15 @@ fn bundle_plugin(
         maybe_codesign(&vst2_bundle_home, compilation_target);
 
         eprintln!("Created a VST2 bundle at '{}'", vst2_bundle_home.display());
+
+        if install {
+            install_plugin(
+                &bundle_name,
+                &vst2_bundle_home,
+                PluginType::Vst2,
+                compilation_target,
+            );
+        }
     }
     if bundle_vst3 {
         let vst3_lib_path =
@@ -510,6 +553,15 @@ fn bundle_plugin(
         maybe_codesign(vst3_bundle_home, compilation_target);
 
         eprintln!("Created a VST3 bundle at '{}'", vst3_bundle_home.display());
+
+        if install {
+            install_plugin(
+                &bundle_name,
+                &vst3_bundle_home,
+                PluginType::Vst3,
+                compilation_target,
+            );
+        }
     }
     if !bundled_plugin {
         eprintln!("Not creating any plugin bundles because the package does not export any plugins")
@@ -554,9 +606,10 @@ fn load_bundler_config() -> Result<Option<BundlerConfig>> {
 fn split_bundle_args(
     args: impl Iterator<Item = String>,
     usage_string: &str,
-) -> Result<(Vec<String>, Vec<String>)> {
+) -> Result<(Vec<String>, bool, Vec<String>)> {
     let mut args = args.peekable();
     let mut packages = Vec::new();
+    let mut install = false;
     if args.peek().map(|s| s.as_str()) == Some("-p") {
         while args.peek().map(|s| s.as_str()) == Some("-p") {
             packages.push(
@@ -570,9 +623,13 @@ fn split_bundle_args(
                 .with_context(|| format!("Missing package name\n\n{usage_string}"))?,
         );
     };
+    if args.peek().map(|s| s.as_str()) == Some("--install") {
+        install = true;
+        args.next();
+    }
     let other_args: Vec<_> = args.collect();
 
-    Ok((packages, other_args))
+    Ok((packages, install, other_args))
 }
 
 /// The target we're compiling for. This is used to determine the paths and options for creating

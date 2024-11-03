@@ -14,3 +14,4 @@ goblin = "0.6.1"
 reflink = { git = "https://github.com/nicokoch/reflink.git", rev = "e8d93b465f5d9ad340cd052b64bbc77b8ee107e2" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.7.2"
+dircpy = "0.3.19"
