@@ -47,10 +47,7 @@ impl View for ResizeHandle {
             WindowEvent::MouseDown(MouseButton::Left) => {
                 // The handle is a triangle, so we should also interact with it as if it was a
                 // triangle
-                if intersects_triangle(
-                    cx.cache.get_bounds(cx.current()),
-                    (cx.mouse().cursorx, cx.mouse().cursory),
-                ) {
+                if intersects_triangle(cx.bounds(), (cx.mouse().cursorx, cx.mouse().cursory)) {
                     cx.capture();
                     cx.set_active(true);
 
@@ -76,10 +73,7 @@ impl View for ResizeHandle {
                 }
             }
             WindowEvent::MouseMove(x, y) => {
-                cx.set_hover(intersects_triangle(
-                    cx.cache.get_bounds(cx.current()),
-                    (x, y),
-                ));
+                cx.set_hover(intersects_triangle(cx.bounds(), (x, y)));
 
                 if self.drag_active {
                     // We need to convert our measurements into physical pixels relative to the

@@ -25,6 +25,8 @@ use crate::params;
 /// normalized parameter.
 const GRANULAR_DRAG_MULTIPLIER: f32 = 0.1;
 
+const TOOLTIP_ID: &'static str = "tooltip";
+
 /// An X-Y pad that controlers two parameters at the same time by binding them to one of the two
 /// axes. This specific implementation has a tooltip for the X-axis parameter and allows
 /// Alt+clicking to enter a specific value.
@@ -248,6 +250,7 @@ impl XyPad {
             Label::new(cx, y_display_value_lens.map(|value| format!("Q: {value}")));
             Label::new(cx, x_display_value_lens);
         })
+        .id(TOOLTIP_ID)
         .class("xy-pad__tooltip")
         .left(XyPad::tooltip_pos_x)
         .top(XyPad::tooltip_pos_y)
@@ -350,11 +353,9 @@ impl XyPad {
 
         // If there's not enough space at the top right, we'll move the tooltip to the
         // bottom and/or the left
-        // NOTE: This is hardcoded to find the tooltip. The Binding also counts as a child.
-        let binding_entity = cx.last_child().expect("Missing child view in X-Y pad");
         let tooltip_entity = cx
-            .with_current(binding_entity, |cx| cx.last_child())
-            .expect("Missing child view in X-Y pad binding");
+            .resolve_entity_identifier(TOOLTIP_ID)
+            .expect("Failed to resolve tooltip id");
         let tooltip_bounds = cx.cache.get_bounds(tooltip_entity);
         // NOTE: The width can vary drastically depending on the frequency value, so we'll
         //       hardcode a minimum width in this comparison to avoid this from jumping
