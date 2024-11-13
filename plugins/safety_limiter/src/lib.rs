@@ -331,6 +331,9 @@ impl SafetyLimiter {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for SafetyLimiter {}
+
 impl ClapPlugin for SafetyLimiter {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.safety-limiter";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Plays SOS in Morse code when redlining");
@@ -350,5 +353,7 @@ impl Vst3Plugin for SafetyLimiter {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(SafetyLimiter);
 nih_export_clap!(SafetyLimiter);
 nih_export_vst3!(SafetyLimiter);

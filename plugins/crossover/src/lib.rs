@@ -381,6 +381,9 @@ impl Crossover {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for Crossover {}
+
 impl ClapPlugin for Crossover {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.crossover";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -415,5 +418,7 @@ impl Vst3Plugin for Crossover {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(Crossover);
 nih_export_clap!(Crossover);
 nih_export_vst3!(Crossover);

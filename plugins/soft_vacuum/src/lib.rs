@@ -398,6 +398,9 @@ const fn oversampling_times_to_factor(times: usize) -> usize {
     times.ilog2() as usize
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for SoftVacuum {}
+
 impl ClapPlugin for SoftVacuum {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.soft-vacuum";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -418,5 +421,7 @@ impl Vst3Plugin for SoftVacuum {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(SoftVacuum);
 nih_export_clap!(SoftVacuum);
 nih_export_vst3!(SoftVacuum);

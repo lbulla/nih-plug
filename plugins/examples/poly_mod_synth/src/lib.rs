@@ -588,6 +588,9 @@ const fn compute_fallback_voice_id(note: u8, channel: u8) -> i32 {
     note as i32 | ((channel as i32) << 16)
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for PolyModSynth {}
+
 impl ClapPlugin for PolyModSynth {
     const CLAP_ID: &'static str = "com.moist-plugins-gmbh.poly-mod-synth";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -622,5 +625,7 @@ impl Vst3Plugin for PolyModSynth {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(PolyModSynth);
 nih_export_clap!(PolyModSynth);
 nih_export_vst3!(PolyModSynth);

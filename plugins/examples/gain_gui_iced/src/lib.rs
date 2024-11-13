@@ -157,6 +157,9 @@ impl Plugin for Gain {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for Gain {}
+
 impl ClapPlugin for Gain {
     const CLAP_ID: &'static str = "com.moist-plugins-gmbh.gain-gui-iced";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A smoothed gain parameter example plugin");
@@ -176,5 +179,7 @@ impl Vst3Plugin for Gain {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(Gain);
 nih_export_clap!(Gain);
 nih_export_vst3!(Gain);

@@ -5,6 +5,8 @@ pub mod clap;
 pub mod state;
 pub(crate) mod util;
 
+#[cfg(all(feature = "au", target_os = "macos"))]
+pub mod au;
 #[cfg(feature = "standalone")]
 pub mod standalone;
 #[cfg(feature = "vst3")]

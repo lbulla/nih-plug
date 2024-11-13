@@ -251,6 +251,9 @@ impl LoudnessWarWinner {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for LoudnessWarWinner {}
+
 impl ClapPlugin for LoudnessWarWinner {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.loudness-war-winner";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Win the loudness war with ease");
@@ -277,5 +280,7 @@ impl Vst3Plugin for LoudnessWarWinner {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(LoudnessWarWinner);
 nih_export_clap!(LoudnessWarWinner);
 nih_export_vst3!(LoudnessWarWinner);

@@ -95,6 +95,9 @@ impl Plugin for SysEx {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for SysEx {}
+
 impl ClapPlugin for SysEx {
     const CLAP_ID: &'static str = "com.moist-plugins-gmbh.sysex";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -113,5 +116,7 @@ impl Vst3Plugin for SysEx {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(SysEx);
 nih_export_clap!(SysEx);
 nih_export_vst3!(SysEx);

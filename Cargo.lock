@@ -1670,6 +1670,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dircpy"
+version = "0.3.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a88521b0517f5f9d51d11925d8ab4523497dcf947073fa3231a311b63941131c"
+dependencies = [
+ "jwalk",
+ "log",
+ "walkdir",
+]
+
+[[package]]
 name = "dirs-next"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3081,6 +3092,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jwalk"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2735847566356cd2179a2a38264839308f7079fa96e6bd5a42d740460e003c56"
+dependencies = [
+ "crossbeam",
+ "rayon",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3576,6 +3597,7 @@ dependencies = [
  "clap",
  "clap-sys",
  "core-foundation 0.9.4",
+ "coreaudio-sys",
  "cpal",
  "crossbeam",
  "jack",
@@ -3658,6 +3680,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",
+ "dircpy",
  "goblin",
  "reflink",
  "serde",

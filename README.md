@@ -4,6 +4,47 @@
 [![Tests](https://github.com/robbert-vdh/nih-plug/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/robbert-vdh/nih-plug/actions/workflows/test.yml?query=branch%3Amaster)
 [![Docs](https://github.com/robbert-vdh/nih-plug/actions/workflows/docs.yml/badge.svg?branch=master)](https://nih-plug.robbertvanderhelm.nl/)
 
+---
+
+## Audio Unit (v2)
+
+> **Work in Progress - Unstable**
+
+This fork implements the audio unit plugin format (v2) for Macs. Since this
+project is still young, a lot of things are not working properly yet, and are
+subject to a lot of changes.
+
+### Milestones
+
+- AU plugins can be built and loaded into a DAW
+
+### Roadmap
+
+- Editor
+- Audio
+- Parameters
+- State
+- Transport
+- MIDI
+- Pass validation (auval)
+- macOS version restrictions (some features are only available in newer versions)
+- Tests
+- Documentation
+- AUv3
+- ...
+
+### Building
+
+A Mac or VM is obviously required for building though cross compilation should
+be possible on Linux with [osxcross](https://github.com/tpoechtrager/osxcross).
+
+Exporting an AU plugin is quite similar to exporting CLAP or VST3. The main
+difference is that additional information must be added to
+[bundler.toml](bundler.toml) for each plugin which is used for the `Info.plist`
+of the `.component` bundle. See any of the bundled plugins for an example.
+
+---
+
 NIH-plug is an API-agnostic audio plugin framework written in Rust, as well as a
 small collection of plugins. The idea is to have a stateful yet simple plugin
 API that gets rid of as much unnecessary ceremony wherever possible, while also
