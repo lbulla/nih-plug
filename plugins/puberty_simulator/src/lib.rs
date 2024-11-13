@@ -415,6 +415,9 @@ impl PubertySimulator {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for PubertySimulator {}
+
 impl ClapPlugin for PubertySimulator {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.puberty-simulator";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Simulates a pitched down cracking voice");
@@ -437,5 +440,7 @@ impl Vst3Plugin for PubertySimulator {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(PubertySimulator);
 nih_export_clap!(PubertySimulator);
 nih_export_vst3!(PubertySimulator);

@@ -336,6 +336,9 @@ impl Diopser {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for Diopser {}
+
 impl ClapPlugin for Diopser {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.diopser";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A totally original phase rotation plugin");
@@ -358,5 +361,7 @@ impl Vst3Plugin for Diopser {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(Diopser);
 nih_export_clap!(Diopser);
 nih_export_vst3!(Diopser);

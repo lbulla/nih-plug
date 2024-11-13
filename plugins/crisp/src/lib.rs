@@ -487,6 +487,9 @@ impl Crisp {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for Crisp {}
+
 impl ClapPlugin for Crisp {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.crisp";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -510,5 +513,7 @@ impl Vst3Plugin for Crisp {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(Crisp);
 nih_export_clap!(Crisp);
 nih_export_vst3!(Crisp);

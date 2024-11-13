@@ -66,6 +66,9 @@ pub fn lipo(inputs: &[&Path], target: &Path) -> Result<()> {
 }
 
 trait PluginInstallPaths {
+    const AU_64: Option<&'static str> = None;
+    const AU_32: Option<&'static str> = None;
+
     const CLAP_64: &'static str;
     const CLAP_32: &'static str;
 
@@ -92,6 +95,10 @@ impl PluginInstallPaths for PluginInstallPathsLinux {
 struct PluginInstallPathsMacOS;
 
 impl PluginInstallPaths for PluginInstallPathsMacOS {
+    const AU_64: Option<&'static str> =
+        Some(concat!(env!("HOME"), "/Library/Audio/Plug-Ins/Components"));
+    const AU_32: Option<&'static str> = Self::AU_64;
+
     const CLAP_64: &'static str = concat!(env!("HOME"), "/Library/Audio/Plug-Ins/CLAP");
     const CLAP_32: &'static str = Self::CLAP_64;
 
@@ -135,6 +142,10 @@ macro_rules! plugin_install_path {
     };
 }
 
+fn plugin_install_path_au(compilation_target: CompilationTarget) -> Option<&'static str> {
+    plugin_install_path!(compilation_target, AU_32, AU_64)
+}
+
 fn plugin_install_path_clap(compilation_target: CompilationTarget) -> &'static str {
     plugin_install_path!(compilation_target, CLAP_32, CLAP_64)
 }
@@ -158,6 +169,15 @@ pub fn install_plugin(
     let extension: &str;
 
     match plugin_type {
+        PluginType::Au => {
+            let install_path_au = plugin_install_path_au(compilation_target);
+            if install_path_au.is_none() {
+                return;
+            }
+            install_root = install_path_au.unwrap();
+            plugin_type_name = "AU";
+            extension = ".component";
+        }
         PluginType::Clap => {
             install_root = plugin_install_path_clap(compilation_target);
             plugin_type_name = "CLAP";

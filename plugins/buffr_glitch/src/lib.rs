@@ -429,6 +429,9 @@ impl Voice {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for BuffrGlitch {}
+
 impl ClapPlugin for BuffrGlitch {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.buffr-glitch";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("MIDI-controller buffer repeat");
@@ -452,5 +455,7 @@ impl Vst3Plugin for BuffrGlitch {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(BuffrGlitch);
 nih_export_clap!(BuffrGlitch);
 nih_export_vst3!(BuffrGlitch);

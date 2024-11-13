@@ -163,6 +163,9 @@ impl Plugin for Stft {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for Stft {}
+
 impl ClapPlugin for Stft {
     const CLAP_ID: &'static str = "com.moist-plugins-gmbh.stft";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("An example plugin using the STFT helper");
@@ -184,5 +187,7 @@ impl Vst3Plugin for Stft {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(Stft);
 nih_export_clap!(Stft);
 nih_export_vst3!(Stft);

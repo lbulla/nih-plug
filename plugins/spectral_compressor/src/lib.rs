@@ -619,6 +619,9 @@ fn process_stft_sidechain(
     compressor_bank.process_sidechain(complex_fft_buffer, channel_idx);
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for SpectralCompressor {}
+
 impl ClapPlugin for SpectralCompressor {
     const CLAP_ID: &'static str = "nl.robbertvanderhelm.spectral-compressor";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Turn things into pink noise on demand");
@@ -644,5 +647,7 @@ impl Vst3Plugin for SpectralCompressor {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(SpectralCompressor);
 nih_export_clap!(SpectralCompressor);
 nih_export_vst3!(SpectralCompressor);
