@@ -202,6 +202,9 @@ impl Plugin for Sine {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for Sine {}
+
 impl ClapPlugin for Sine {
     const CLAP_ID: &'static str = "com.moist-plugins-gmbh.sine";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -226,5 +229,7 @@ impl Vst3Plugin for Sine {
     ];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(Sine);
 nih_export_clap!(Sine);
 nih_export_vst3!(Sine);

@@ -47,7 +47,7 @@ members = [
 ]
 
 [features]
-default = ["vst3"]
+default = ["au", "vst3"]
 
 # Enabling this feature will cause the plugin to terminate when allocations
 # occur in the processing function during debug builds. Keep in mind that panics
@@ -58,6 +58,9 @@ assert_process_allocs = ["dep:assert_no_alloc"]
 # `nih_export_standalone()` function. Disabled by default as this requires
 # building additional dependencies for audio and MIDI handling.
 standalone = ["dep:baseview", "dep:clap", "dep:cpal", "dep:jack", "dep:midir", "dep:rtrb"]
+
+au = ["dep:coreaudio-sys"]
+
 # Enables the `nih_export_vst3!()` macro. Enabled by default. This feature
 # exists mostly for GPL-compliance reasons, since even if you don't use the VST3
 # wrapper you might otherwise still include a couple (unused) symbols from the
@@ -127,6 +130,8 @@ libc = "0.2.124"
 objc2 = "0.5.2"
 objc2-foundation = { version = "0.2.2", features = ["NSThread"] }
 core-foundation = "0.9.3"
+
+coreaudio-sys = { version = "0.2.16", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows]
 version = "0.44"

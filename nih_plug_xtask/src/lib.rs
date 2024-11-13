@@ -1,4 +1,5 @@
 use anyhow::Context;
+use cargo_metadata::Metadata;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -14,6 +15,10 @@ mod util;
 
 /// Re-export for the main function.
 pub use anyhow::Result;
+
+const AU_TYPES: &'static [&'static str] = &[
+    "auou", "aumu", "aumf", "aufc", "aufx", "aumx", "aupn", "augn", "auol", "aumi",
+];
 
 fn build_usage_string(command_name: &str) -> String {
     format!(
@@ -39,6 +44,11 @@ type BundlerConfig = HashMap<String, PackageConfig>;
 #[derive(Debug, Clone, Deserialize)]
 struct PackageConfig {
     name: Option<String>,
+    au_manufacturer: Option<String>,
+    au_manufacturer_short: Option<String>,
+    au_type: Option<String>,
+    au_subtype: Option<String>,
+    au_version: Option<String>,
 }
 
 /// The target we're generating a plugin for. This can be either the native target or a cross
@@ -71,6 +81,7 @@ pub enum BundleType {
 }
 
 pub enum PluginType {
+    Au,
     Clap,
     Vst2,
     Vst3,
@@ -109,9 +120,23 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
             // As explained above, for efficiency's sake this is a two step process
             build(&packages, &other_args)?;
 
-            bundle(target_dir, &packages[0], &other_args, false, install)?;
+            bundle(
+                target_dir,
+                &packages[0],
+                &other_args,
+                false,
+                install,
+                &cargo_metadata,
+            )?;
             for package in packages.into_iter().skip(1) {
-                bundle(target_dir, &package, &other_args, false, install)?;
+                bundle(
+                    target_dir,
+                    &package,
+                    &other_args,
+                    false,
+                    install,
+                    &cargo_metadata,
+                )?;
             }
 
             Ok(())
@@ -147,9 +172,23 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
 
             // This `true` indicates a universal build. This will cause the two sets of built
             // binaries to beq lipo'd together into universal binaries before bundling
-            bundle(target_dir, &packages[0], &other_args, true, install)?;
+            bundle(
+                target_dir,
+                &packages[0],
+                &other_args,
+                true,
+                install,
+                &cargo_metadata,
+            )?;
             for package in packages.into_iter().skip(1) {
-                bundle(target_dir, &package, &other_args, true, install)?;
+                bundle(
+                    target_dir,
+                    &package,
+                    &other_args,
+                    true,
+                    install,
+                    &cargo_metadata,
+                )?;
             }
 
             Ok(())
@@ -233,6 +272,7 @@ pub fn bundle(
     args: &[String],
     universal: bool,
     install: bool,
+    cargo_metadata: &Metadata,
 ) -> Result<()> {
     let mut build_type_dir = "debug";
     let mut cross_compile_target: Option<String> = None;
@@ -306,6 +346,7 @@ pub fn bundle(
                 package,
                 &[&x86_64_bin_path, &aarch64_bin_path],
                 CompilationTarget::MacOSUniversal,
+                cargo_metadata,
             )?;
         }
         if build_lib {
@@ -314,6 +355,7 @@ pub fn bundle(
                 package,
                 &[&x86_64_lib_path, &aarch64_lib_path],
                 CompilationTarget::MacOSUniversal,
+                cargo_metadata,
                 install,
             )?;
         }
@@ -339,7 +381,13 @@ to your Cargo.toml file?"#,
 
         eprintln!();
         if bin_path.exists() {
-            bundle_binary(target_dir, package, &[&bin_path], compilation_target)?;
+            bundle_binary(
+                target_dir,
+                package,
+                &[&bin_path],
+                compilation_target,
+                cargo_metadata,
+            )?;
         }
         if lib_path.exists() {
             bundle_plugin(
@@ -347,6 +395,7 @@ to your Cargo.toml file?"#,
                 package,
                 &[&lib_path],
                 compilation_target,
+                cargo_metadata,
                 install,
             )?;
         }
@@ -363,12 +412,11 @@ fn bundle_binary(
     package: &str,
     bin_paths: &[&Path],
     compilation_target: CompilationTarget,
+    cargo_metadata: &Metadata,
 ) -> Result<()> {
     let bundle_home_dir = bundle_home(target_dir);
-    let bundle_name = match load_bundler_config()?.and_then(|c| c.get(package).cloned()) {
-        Some(PackageConfig { name: Some(name) }) => name,
-        _ => package.to_string(),
-    };
+    let package_config = load_bundler_config()?.and_then(|c| c.get(package).cloned());
+    let bundle_name = bundle_name(package_config.as_ref(), &package);
 
     // On MacOS the standalone target needs to be in a bundle
     let standalone_bundle_binary_name =
@@ -408,6 +456,9 @@ fn bundle_binary(
         &standalone_bundle_home,
         compilation_target,
         BundleType::Binary,
+        false,
+        None,
+        cargo_metadata,
     )?;
     maybe_codesign(&standalone_bundle_home, compilation_target);
 
@@ -427,13 +478,12 @@ fn bundle_plugin(
     package: &str,
     lib_paths: &[&Path],
     compilation_target: CompilationTarget,
+    cargo_metadata: &Metadata,
     install: bool,
 ) -> Result<()> {
     let bundle_home_dir = bundle_home(target_dir);
-    let bundle_name = match load_bundler_config()?.and_then(|c| c.get(package).cloned()) {
-        Some(PackageConfig { name: Some(name) }) => name,
-        _ => package.to_string(),
-    };
+    let package_config = load_bundler_config()?.and_then(|c| c.get(package).cloned());
+    let bundle_name = bundle_name(package_config.as_ref(), &package);
 
     // We'll detect the plugin formats supported by the plugin binary and create bundled accordingly.
     // If `lib_path` contains paths to multiple plugins that need to be combined into a macOS
@@ -441,6 +491,8 @@ fn bundle_plugin(
     // first one.
     let first_lib_path = lib_paths.first().context("Empty library paths slice")?;
 
+    let bundle_au = symbols::exported(first_lib_path, "factory")
+        .with_context(|| format!("Could not parse '{}'", first_lib_path.display()))?;
     let bundle_clap = symbols::exported(first_lib_path, "clap_entry")
         .with_context(|| format!("Could not parse '{}'", first_lib_path.display()))?;
     // We'll ignore the platform-specific entry points for VST2 plugins since there's no reason to
@@ -451,8 +503,47 @@ fn bundle_plugin(
         .with_context(|| format!("Could not parse '{}'", first_lib_path.display()))?;
     let bundle_vst3 = symbols::exported(first_lib_path, "GetPluginFactory")
         .with_context(|| format!("Could not parse '{}'", first_lib_path.display()))?;
-    let bundled_plugin = bundle_clap || bundle_vst2 || bundle_vst3;
+    let bundled_plugin = bundle_au || bundle_clap || bundle_vst2 || bundle_vst3;
 
+    if bundle_au {
+        let au_lib_path =
+            bundle_home_dir.join(au_bundle_library_name(&bundle_name, compilation_target));
+
+        fs::create_dir_all(au_lib_path.parent().unwrap())
+            .context("Could not create AU bundle directory")?;
+        util::reflink_or_combine(lib_paths, &au_lib_path, compilation_target)
+            .context("Could not create AU bundle")?;
+
+        let au_bundle_home = au_lib_path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        maybe_create_macos_bundle_metadata(
+            package,
+            &bundle_name,
+            &au_bundle_home,
+            compilation_target,
+            BundleType::Plugin,
+            true,
+            package_config.as_ref(),
+            cargo_metadata,
+        )?;
+        maybe_codesign(&au_bundle_home, compilation_target);
+
+        eprintln!("Created an AU bundle at '{}'", au_bundle_home.display());
+
+        if install {
+            install_plugin(
+                &bundle_name,
+                &au_bundle_home,
+                PluginType::Au,
+                compilation_target,
+            );
+        }
+    }
     if bundle_clap {
         let clap_bundle_library_name = clap_bundle_library_name(&bundle_name, compilation_target);
         let clap_lib_path = bundle_home_dir.join(&clap_bundle_library_name);
@@ -476,6 +567,9 @@ fn bundle_plugin(
             &clap_bundle_home,
             compilation_target,
             BundleType::Plugin,
+            false,
+            None,
+            cargo_metadata,
         )?;
         maybe_codesign(&clap_bundle_home, compilation_target);
 
@@ -513,6 +607,9 @@ fn bundle_plugin(
             &vst2_bundle_home,
             compilation_target,
             BundleType::Plugin,
+            false,
+            None,
+            cargo_metadata,
         )?;
         maybe_codesign(&vst2_bundle_home, compilation_target);
 
@@ -549,6 +646,9 @@ fn bundle_plugin(
             vst3_bundle_home,
             compilation_target,
             BundleType::Plugin,
+            false,
+            None,
+            cargo_metadata,
         )?;
         maybe_codesign(vst3_bundle_home, compilation_target);
 
@@ -677,6 +777,12 @@ fn bundle_home(target_directory: &Path) -> PathBuf {
     target_directory.join("bundled")
 }
 
+fn bundle_name(package_config: Option<&PackageConfig>, default: &str) -> String {
+    package_config.map_or(default.to_string(), |p| {
+        p.name.clone().unwrap_or(default.to_string())
+    })
+}
+
 /// The base directory for the compiled binaries. This does not use [`CompilationTarget`] as we need
 /// to be able to differentiate between native and cross-compilation.
 fn target_base(target_directory: &Path, cross_compile_target: Option<&str>) -> Result<PathBuf> {
@@ -722,6 +828,15 @@ fn standalone_bundle_binary_name(package: &str, target: CompilationTarget) -> St
             format!("{package}.app/Contents/MacOS/{package}")
         }
         CompilationTarget::Windows(_) => format!("{package}.exe"),
+    }
+}
+
+fn au_bundle_library_name(package: &str, target: CompilationTarget) -> String {
+    match target {
+        CompilationTarget::MacOS(_) | CompilationTarget::MacOSUniversal => {
+            format!("{package}.component/Contents/MacOS/{package}")
+        }
+        _ => String::new(),
     }
 }
 
@@ -784,16 +899,38 @@ fn vst3_bundle_library_name(package: &str, target: CompilationTarget) -> String 
     }
 }
 
+fn au_version_to_hex(major: u64, minor: u64, patch: u64) -> u64 {
+    (major << 16) + (minor << 8) + patch
+}
+
+fn au_version_string_to_hex(package: &str, version: &String) -> Result<u64> {
+    let parts = version.split('.').collect::<Vec<&str>>();
+    if parts.len() == 3 {
+        Ok(au_version_to_hex(
+            parts[0].parse()?,
+            parts[1].parse()?,
+            parts[2].parse()?,
+        ))
+    } else {
+        anyhow::bail!(
+            "The AU version string of AU plugin '{package}' must have this format: `1.0.0`"
+        )
+    }
+}
+
 /// If compiling for macOS, create all of the bundl-y stuff Steinberg and Apple require you to have.
 ///
 /// This still requires you to move the dylib file to `{bundle_home}/Contents/macOS/{package}`
 /// yourself first.
-pub fn maybe_create_macos_bundle_metadata(
+fn maybe_create_macos_bundle_metadata(
     package: &str,
     display_name: &str,
     bundle_home: &Path,
     target: CompilationTarget,
     bundle_type: BundleType,
+    au: bool,
+    package_config: Option<&PackageConfig>,
+    cargo_metadata: &Metadata,
 ) -> Result<()> {
     if !matches!(
         target,
@@ -814,14 +951,118 @@ pub fn maybe_create_macos_bundle_metadata(
         format!("{package_type}????"),
     )
     .context("Could not create PkgInfo file")?;
-    fs::write(
-        bundle_home.join("Contents").join("Info.plist"),
-        format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 
+    let mut plist = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist>
-  <dict>
-    <key>CFBundleExecutable</key>
+<dict>
+"#.to_string();
+
+    if au {
+        let package_config = package_config.as_ref().context(format!(
+            "Missing `package_config` for AU plugin `{package}`"
+        ))?;
+        let au_manufacturer = package_config.au_manufacturer.as_ref().context(format!(
+            "Missing `au_manufacturer` for AU plugin `{package}`"
+        ))?;
+
+        let au_manufacturer_short =
+            package_config
+                .au_manufacturer_short
+                .as_ref()
+                .context(format!(
+                    "Missing `au_manufacturer_short` for AU plugin `{package}`"
+                ))?;
+        if au_manufacturer_short.len() != 4 {
+            anyhow::bail!(
+                "`au_manufacturer_short` of AU plugin `{package}` must have 4 letters instead of \
+                 `{au_manufacturer_short}`"
+            )
+        }
+        for char in au_manufacturer_short.chars() {
+            if !char.is_uppercase() {
+                anyhow::bail!(
+                    "`au_manufacturer_short` of AU plugin `{package}` must only contain uppercase \
+                     letters instead of `{au_manufacturer_short}`"
+                )
+            }
+        }
+
+        let au_type = package_config
+            .au_type
+            .as_ref()
+            .context(format!("Missing `au_type` for AU plugin `{package}`"))?;
+        if !AU_TYPES.contains(&au_type.as_str()) {
+            anyhow::bail!(
+                "Invalid `au_type` for AU plugin `{package}`: {au_type}. These types are \
+                 supported: {AU_TYPES:?}."
+            )
+        }
+
+        let au_subtype = package_config
+            .au_subtype
+            .as_ref()
+            .context(format!("Missing `au_sub_type` for AU plugin `{package}`"))?;
+        if au_subtype.len() != 4 {
+            anyhow::bail!(
+                "`au_subtype` of AU plugin `{package}` must have 4 letters instead of \
+                 `{au_subtype}`"
+            )
+        }
+        for char in au_subtype.chars() {
+            if !char.is_uppercase() {
+                anyhow::bail!(
+                    "`au_subtype` of AU plugin `{package}` must only contain uppercase letters \
+                     instead of `{au_subtype}`"
+                )
+            }
+        }
+
+        let au_version;
+        if let Some(au_version_string) = package_config.au_version.as_ref() {
+            au_version = au_version_string_to_hex(package, au_version_string)?;
+        } else {
+            let cargo_package = cargo_metadata
+                .packages
+                .iter()
+                .find(|p| p.name == package)
+                .context("Could not find package of AU plugin {package}")?;
+            au_version = au_version_to_hex(
+                cargo_package.version.major,
+                cargo_package.version.minor,
+                cargo_package.version.patch,
+            );
+        }
+
+        plist += format!(
+            r#"    <key>AudioComponents</key>
+    <array>
+        <dict>
+            <key>name</key>
+            <string>{au_manufacturer}: {display_name}</string>
+            <key>description</key>
+            <string>{display_name}</string>
+            <key>manufacturer</key>
+            <string>{au_manufacturer_short}</string>
+            <key>type</key>
+            <string>{au_type}</string>
+            <key>subtype</key>
+            <string>{au_subtype}</string>
+            <key>version</key>
+            <integer>{au_version}</integer>
+            <key>factoryFunction</key>
+            <string>factory</string>
+            <key>sandboxSafe</key>
+            <true/>
+        </dict>
+    </array>
+"#
+        )
+        .as_str();
+    }
+
+    plist += format!(
+        r#"    <key>CFBundleExecutable</key>
     <string>{display_name}</string>
     <key>CFBundleIconFile</key>
     <string></string>
@@ -843,11 +1084,13 @@ pub fn maybe_create_macos_bundle_metadata(
     <string></string>
     <key>NSHighResolutionCapable</key>
     <true/>
-  </dict>
-</plist>
-"#),
+</dict>
+</plist>"#
     )
-    .context("Could not create Info.plist file")?;
+    .as_str();
+
+    fs::write(bundle_home.join("Contents").join("Info.plist"), plist)
+        .context("Could not create Info.plist file")?;
 
     Ok(())
 }

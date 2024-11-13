@@ -4,6 +4,8 @@ pub use std::num::NonZeroU32;
 // Re-export the macros, derive macros are already re-exported from their respective modules
 pub use crate::debug::*;
 
+#[cfg(all(feature = "au", target_os = "macos"))]
+pub use crate::nih_export_au;
 pub use crate::nih_export_clap;
 #[cfg(feature = "vst3")]
 pub use crate::nih_export_vst3;
@@ -34,6 +36,8 @@ pub use crate::params::range::{FloatRange, IntRange};
 pub use crate::params::smoothing::{AtomicF32, Smoothable, Smoother, SmoothingStyle};
 pub use crate::params::Params;
 pub use crate::params::{BoolParam, FloatParam, IntParam, Param, ParamFlags};
+#[cfg(all(feature = "au", target_os = "macos"))]
+pub use crate::plugin::au::AuPlugin;
 pub use crate::plugin::clap::{ClapPlugin, PolyModulationConfig};
 #[cfg(feature = "vst3")]
 pub use crate::plugin::vst3::Vst3Plugin;

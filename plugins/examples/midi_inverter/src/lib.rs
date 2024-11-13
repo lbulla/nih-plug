@@ -216,6 +216,9 @@ impl Plugin for MidiInverter {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl AuPlugin for MidiInverter {}
+
 impl ClapPlugin for MidiInverter {
     const CLAP_ID: &'static str = "com.moist-plugins-gmbh.midi-inverter";
     const CLAP_DESCRIPTION: Option<&'static str> =
@@ -231,5 +234,7 @@ impl Vst3Plugin for MidiInverter {
         &[Vst3SubCategory::Instrument, Vst3SubCategory::Tools];
 }
 
+#[cfg(target_os = "macos")]
+nih_export_au!(MidiInverter);
 nih_export_clap!(MidiInverter);
 nih_export_vst3!(MidiInverter);

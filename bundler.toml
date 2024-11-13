@@ -3,30 +3,152 @@
 #
 # [package_name]
 # name = "Human Readable Plugin Name"  # defaults to <package_name>
-
-[soft_vacuum]
-name = "Soft Vacuum"
+#
+# Additional information required for the AU bundle's `Info.plist`:
+#
+# au_manufacturer = "AU Manufacturer Name"
+# au_manufacturer_short = "ABCD"  # 4 letters, uppercase
+#
+# Choose one (see `AUComponent.h`):
+# - "auou" (can be used as the head of an AUGraph)
+# - "aumu" (instrument)
+# - "aumf" (effect with MIDI)
+# - "aufc" (format converter)
+# - "aufx" (effect)
+# - "aumx" (mixer)
+# - "aupn" (panner)
+# - "augn" (generator)
+# - "auol" (offline effect)
+# - "aumi" (MIDI effect)
+# au_type = "aufx"
+#
+# au_subtype = "ABCD"  # 4 letters, uppercase, must be unique for a manufacturer
+# au_version = "1.0.0"  # 3 numbers separated by dots, defaults to the package's version
 
 [buffr_glitch]
 name = "Buffr Glitch"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "BFGL"
 
 [crisp]
 name = "Crisp"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "CRIS"
 
 [crossover]
 name = "Crossover"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "CROS"
 
 [diopser]
 name = "Diopser"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "DIOP"
 
 [loudness_war_winner]
 name = "Loudness War Winner"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "LOWW"
 
 [puberty_simulator]
 name = "Puberty Simulator"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "PUSI"
 
 [safety_limiter]
 name = "Safety Limiter"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "SALI"
+
+[soft_vacuum]
+name = "Soft Vacuum"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "SAVA"
 
 [spectral_compressor]
 name = "Spectral Compressor"
+au_manufacturer = "Robbert van der Helm"
+au_manufacturer_short = "RDVH"
+au_type = "aufx"
+au_subtype = "SPCO"
+
+# examples
+
+[gain]
+name = "Gain"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aufx"
+au_subtype = "GAIN"
+
+[gain_gui_egui]
+name = "Gain GUI (egui)"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aufx"
+au_subtype = "GGEG"
+
+[gain_gui_iced]
+name = "Gain GUI (iced)"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aufx"
+au_subtype = "GGIC"
+
+[gain_gui_vizia]
+name = "Gain GUI (VIZIA)"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aufx"
+au_subtype = "GGVI"
+
+[midi_inverter]
+name = "MIDI Inverter"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aumf"  # TODO: Should probably be "aumi" but this is not supported by many hosts
+au_subtype = "MIIN"
+
+[poly_mod_synth]
+name = "Poly Mod Synth"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aumu"
+au_subtype = "PMSY"
+
+[sine]
+name = "Sine Test Tone"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aumu"
+au_subtype = "SITT"
+
+[stft]
+name = "STFT Example"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aufx"
+au_subtype = "STFT"
+
+[sysex]
+name = "SysEx Example"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aumf"  # TODO: Should probably be "aumi" but this is not supported by many hosts
+au_subtype = "SYEX"
