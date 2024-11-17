@@ -1,13 +1,20 @@
 use std::ffi::c_void;
+use std::ptr::null;
+use std::sync::Arc;
 
 use nih_plug_derive::PropertyDispatcherImpl;
 
 use crate::prelude::AuPlugin;
+use crate::wrapper::au::editor::WrapperViewCreator;
 use crate::wrapper::au::{au_sys, Wrapper, NO_ERROR};
 
 // ---------- Constants ---------- //
 
 const GLOBAL_SCOPE: &'static [au_sys::AudioUnitScope] = &[au_sys::kAudioUnitScope_Global];
+
+// NOTE: 0 -> 63999 is reserved (see `AudioUnitProperties.h`).
+//       But we use a less obvious value than 64000.
+const WRAPPER_PROPERTY_ID: au_sys::AudioUnitPropertyID = 0x787725F1;
 
 // ---------- PropertyDispatcher ---------- //
 
@@ -17,6 +24,9 @@ const GLOBAL_SCOPE: &'static [au_sys::AudioUnitScope] = &[au_sys::kAudioUnitScop
 #[allow(clippy::enum_variant_names, dead_code)]
 pub(super) enum PropertyDispatcher {
     CocoaUIProperty,
+
+    // NOTE: Internal property for the editor.
+    WrapperProperty,
 }
 
 pub(super) trait PropertyDispatcherImpl<P: AuPlugin> {
@@ -419,6 +429,41 @@ declare_property!(
     type Type = au_sys::AudioUnitCocoaViewInfo;
 
     fn size(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        if wrapper.has_editor() {
+            default_size!()
+        } else {
+            0
+        }
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        nih_debug_assert!(
+            wrapper.has_editor(),
+            "This should have been prevented by the size of 0"
+        );
+        out_data.mCocoaAUViewBundleLocation = WrapperViewCreator::<P>::bundle_location();
+        out_data.mCocoaAUViewClass[0] = WrapperViewCreator::<P>::class_name();
+        NO_ERROR
+    }
+);
+
+declare_property!(
+    pub(super) struct WrapperProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = WRAPPER_PROPERTY_ID;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = *const Wrapper<P>;
+
+    fn size(
         _wrapper: &Wrapper<P>,
         _in_scope: au_sys::AudioUnitScope,
         _in_element: au_sys::AudioUnitElement,
@@ -427,12 +472,36 @@ declare_property!(
     }
 
     fn get_impl(
-        _wrapper: &Wrapper<P>,
+        wrapper: &Wrapper<P>,
         _in_scope: au_sys::AudioUnitScope,
         _in_element: au_sys::AudioUnitElement,
         out_data: &mut Type,
     ) -> au_sys::OSStatus {
-        *out_data = au_sys::AudioUnitCocoaViewInfo::default();
+        *out_data = Arc::into_raw(wrapper.as_arc());
         NO_ERROR
     }
 );
+
+pub(super) fn wrapper_for_audio_unit<P: AuPlugin>(
+    audio_unit: au_sys::AudioUnit,
+) -> Option<Arc<Wrapper<P>>> {
+    let mut wrapper = null::<Wrapper<P>>();
+    let mut property_size = size_of_val(&wrapper) as au_sys::UInt32;
+
+    let result = unsafe {
+        au_sys::AudioUnitGetProperty(
+            audio_unit,
+            WRAPPER_PROPERTY_ID,
+            au_sys::kAudioUnitScope_Global,
+            0,
+            &raw mut wrapper as _,
+            &raw mut property_size,
+        )
+    };
+
+    if result == NO_ERROR {
+        unsafe { Some(Arc::from_raw(wrapper)) }
+    } else {
+        None
+    }
+}

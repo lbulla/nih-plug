@@ -1,10 +1,19 @@
 use atomic_refcell::AtomicRefCell;
+use crossbeam::queue::ArrayQueue;
+use dispatch::Queue;
+use objc2::rc::Retained;
+use objc2_app_kit::NSView;
+use objc2_foundation::NSThread;
 use parking_lot::Mutex;
+use std::any::Any;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Weak};
 
-use crate::prelude::AuPlugin;
+use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
+use crate::prelude::{AsyncExecutor, AuPlugin, Editor, ParentWindowHandle, TaskExecutor};
+use crate::wrapper::au::context::WrapperGuiContext;
+use crate::wrapper::au::editor::WrapperViewHolder;
 use crate::wrapper::au::properties::{PropertyDispatcher, PropertyDispatcherImpl};
 use crate::wrapper::au::util::ThreadWrapper;
 use crate::wrapper::au::{au_sys, AuPropertyListenerProc, NO_ERROR};
@@ -16,6 +25,13 @@ struct PropertyListener {
     data: ThreadWrapper<*mut c_void>,
 }
 
+enum Task<P: AuPlugin> {
+    PluginTask(P::BackgroundTask),
+
+    // NOTE: A `NSView` must be resized on the main thread.
+    RequestResize,
+}
+
 // ---------- Wrapper ---------- //
 
 pub(super) struct Wrapper<P: AuPlugin> {
@@ -24,11 +40,19 @@ pub(super) struct Wrapper<P: AuPlugin> {
     this: AtomicRefCell<Weak<Wrapper<P>>>,
     plugin: Mutex<P>,
     property_listeners: AtomicRefCell<HashMap<au_sys::AudioUnitPropertyID, Vec<PropertyListener>>>,
+
+    task_executor: Mutex<TaskExecutor<P>>,
+    tasks: ArrayQueue<Task<P>>,
+    background_thread: AtomicRefCell<Option<BackgroundThread<Task<P>, Self>>>,
+
+    editor: AtomicRefCell<Option<Mutex<Box<dyn Editor>>>>,
+    wrapper_view_holder: AtomicRefCell<WrapperViewHolder>,
 }
 
 impl<P: AuPlugin> Wrapper<P> {
     pub(super) fn new(unit: au_sys::AudioUnit) -> Arc<Self> {
-        let plugin = P::default();
+        let mut plugin = P::default();
+        let task_executor = plugin.task_executor();
 
         let wrapper = Arc::new(Self {
             unit: ThreadWrapper::new(unit),
@@ -36,9 +60,42 @@ impl<P: AuPlugin> Wrapper<P> {
             this: AtomicRefCell::new(Weak::new()),
             plugin: Mutex::new(plugin),
             property_listeners: AtomicRefCell::new(HashMap::new()),
+
+            task_executor: Mutex::new(task_executor),
+            tasks: ArrayQueue::new(TASK_QUEUE_CAPACITY),
+            background_thread: AtomicRefCell::new(None),
+
+            editor: AtomicRefCell::new(None),
+            wrapper_view_holder: AtomicRefCell::new(WrapperViewHolder::default()),
         });
 
         *wrapper.this.borrow_mut() = Arc::downgrade(&wrapper);
+
+        *wrapper.background_thread.borrow_mut() =
+            Some(BackgroundThread::get_or_create(Arc::downgrade(&wrapper)));
+
+        *wrapper.editor.borrow_mut() = wrapper
+            .plugin
+            .lock()
+            .editor(AsyncExecutor {
+                execute_background: Arc::new({
+                    let wrapper = wrapper.clone();
+
+                    move |task| {
+                        let task_posted = wrapper.schedule_background(Task::PluginTask(task));
+                        nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
+                    }
+                }),
+                execute_gui: Arc::new({
+                    let wrapper = wrapper.clone();
+
+                    move |task| {
+                        let task_posted = wrapper.schedule_gui(Task::PluginTask(task));
+                        nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
+                    }
+                }),
+            })
+            .map(Mutex::new);
 
         wrapper
     }
@@ -47,6 +104,50 @@ impl<P: AuPlugin> Wrapper<P> {
 
     pub(super) fn unit(&self) -> au_sys::AudioUnit {
         self.unit.get()
+    }
+
+    pub(super) fn as_arc(&self) -> Arc<Self> {
+        self.this.borrow().upgrade().unwrap()
+    }
+
+    // ---------- Contexts ---------- //
+
+    fn make_gui_context(&self) -> Arc<WrapperGuiContext<P>> {
+        Arc::new(WrapperGuiContext {
+            wrapper: self.as_arc(),
+        })
+    }
+
+    // ---------- Editor ---------- //
+
+    pub(super) fn has_editor(&self) -> bool {
+        self.editor.borrow().is_some()
+    }
+
+    #[must_use]
+    pub(super) fn spawn_editor(&self, view: &Retained<NSView>) -> Box<dyn Any + Send> {
+        let editor = self.editor.borrow();
+        let editor = editor
+            .as_ref()
+            .expect("`spawn_editor` called without an editor")
+            .lock();
+
+        let parent_handle = ParentWindowHandle::AppKitNsView(Retained::as_ptr(view) as _);
+        let editor_handle = editor.spawn(parent_handle, self.make_gui_context());
+        self.wrapper_view_holder
+            .borrow_mut()
+            .init(view, editor.size());
+        editor_handle
+    }
+
+    pub(super) fn request_resize(&self) -> bool {
+        if self.wrapper_view_holder.borrow().has_view() {
+            let task_posted = self.schedule_gui(Task::RequestResize);
+            nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
+            true
+        } else {
+            false
+        }
     }
 
     // ---------- Setup ---------- //
@@ -148,6 +249,63 @@ impl<P: AuPlugin> Wrapper<P> {
                         in_element,
                     );
                 }
+            }
+        }
+    }
+}
+
+// ---------- Events / Tasks ---------- //
+
+impl<P: AuPlugin> EventLoop<Task<P>, Wrapper<P>> for Wrapper<P> {
+    fn new_and_spawn(_executor: Weak<Self>) -> Self {
+        panic!("What are you doing");
+    }
+
+    fn schedule_gui(&self, task: Task<P>) -> bool {
+        if self.is_main_thread() {
+            self.execute(task, true);
+            true
+        } else {
+            let success = self.tasks.push(task).is_ok();
+            if success {
+                Queue::main().exec_async({
+                    let wrapper = self.as_arc();
+                    move || {
+                        while let Some(task) = wrapper.tasks.pop() {
+                            wrapper.execute(task, true);
+                        }
+                    }
+                });
+            }
+            success
+        }
+    }
+
+    fn schedule_background(&self, task: Task<P>) -> bool {
+        self.background_thread
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .schedule(task)
+    }
+
+    fn is_main_thread(&self) -> bool {
+        NSThread::isMainThread_class()
+    }
+}
+
+impl<P: AuPlugin> MainThreadExecutor<Task<P>> for Wrapper<P> {
+    fn execute(&self, task: Task<P>, is_gui_thread: bool) {
+        match task {
+            Task::PluginTask(task) => (self.task_executor.lock())(task),
+            Task::RequestResize => {
+                nih_debug_assert!(
+                    is_gui_thread,
+                    "A `NSView` must be resized on the main thread"
+                );
+                self.wrapper_view_holder
+                    .borrow()
+                    .resize(self.editor.borrow().as_ref().unwrap().lock().size());
             }
         }
     }
