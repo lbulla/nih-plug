@@ -19,6 +19,7 @@ members = [
   "nih_plug_vizia",
   "nih_plug_xtask",
 
+  "auval",
   "cargo_nih_plug",
   "xtask",
 
