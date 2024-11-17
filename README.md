@@ -17,10 +17,10 @@ subject to a lot of changes.
 ### Milestones
 
 - AU plugins can be built and loaded into a DAW
+- The Editor can be opened and resized internally (VIZIA only)
 
 ### Roadmap
 
-- Editor
 - Audio
 - Parameters
 - State
