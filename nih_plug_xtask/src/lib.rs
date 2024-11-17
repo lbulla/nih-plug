@@ -23,17 +23,30 @@ const AU_TYPES: &'static [&'static str] = &[
 fn build_usage_string(command_name: &str) -> String {
     format!(
         "Usage:
-  {command_name} bundle <package> [--install] [--release]
-  {command_name} bundle -p <package1> -p <package2> ... [--install] [--release]
+  {command_name} bundle <package> [--install] [--auval] [--release]
+  {command_name} bundle -p <package1> -p <package2> ... [--install] [--auval] [--release]
 
-  {command_name} bundle-universal <package> [--install] [--release]  (macOS only)
-  {command_name} bundle-universal -p <package1> -p <package2> ... [--install] [--release]  (macOS \
-         only)
+  {command_name} bundle-universal <package> [--install] [--auval] [--release]  (macOS only)
+  {command_name} bundle-universal -p <package1> -p <package2> ... [--install] [--auval] \
+         [--release]  (macOS only)
 
   All other 'cargo build' options are supported, including '--target' and '--profile'.
+
   Additionally, the option '--install' can be used directly after the packages to install the \
          plugins into their default directories (see 'util::PluginInstallPaths'). Not supported \
-         for standalone."
+         for standalone.
+
+  To run the validation ('auval') for an AU plugin, use the option '--auval' after the packages / \
+         '--install'. This will always install the plugins because that is required."
+    )
+}
+
+// TODO: Support more options.
+fn build_usage_string_auval(command_name: &str) -> String {
+    format!(
+        "Usage:
+  {command_name} <package>
+  {command_name} -p <package1> -p <package2> ..."
     )
 }
 
@@ -115,7 +128,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
             // cargo build, but you can also build a single package without specifying `-p`. Since
             // multiple packages can be built in parallel if we pass all of these flags to a single
             // `cargo build` we'll first build all of these packages and only then bundle them.
-            let (packages, install, other_args) = split_bundle_args(args, &usage_string)?;
+            let (packages, install, auval, other_args) = split_bundle_args(args, &usage_string)?;
 
             // As explained above, for efficiency's sake this is a two step process
             build(&packages, &other_args)?;
@@ -126,6 +139,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
                 &other_args,
                 false,
                 install,
+                auval,
                 &cargo_metadata,
             )?;
             for package in packages.into_iter().skip(1) {
@@ -135,6 +149,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
                     &other_args,
                     false,
                     install,
+                    auval,
                     &cargo_metadata,
                 )?;
             }
@@ -145,7 +160,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
             // The same as `--bundle`, but builds universal binaries for macOS Cargo will also error
             // out on duplicate `--target` options, but it seems like a good idea to preemptively
             // abort the bundling process if that happens
-            let (packages, install, other_args) = split_bundle_args(args, &usage_string)?;
+            let (packages, install, auval, other_args) = split_bundle_args(args, &usage_string)?;
 
             for arg in &other_args {
                 if arg == "--target" || arg.starts_with("--target=") {
@@ -178,6 +193,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
                 &other_args,
                 true,
                 install,
+                auval,
                 &cargo_metadata,
             )?;
             for package in packages.into_iter().skip(1) {
@@ -187,6 +203,7 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
                     &other_args,
                     true,
                     install,
+                    auval,
                     &cargo_metadata,
                 )?;
             }
@@ -198,6 +215,61 @@ pub fn main_with_args(command_name: &str, args: impl IntoIterator<Item = String>
         "known-packages" => list_known_packages(),
         _ => anyhow::bail!("Unknown command '{command}'\n\n{usage_string}"),
     }
+}
+
+pub fn main_auval() -> Result<()> {
+    let args = std::env::args().skip(1);
+    main_auval_with_args("cargo auval", args)
+}
+
+pub fn main_auval_with_args(
+    command_name: &str,
+    args: impl IntoIterator<Item = String>,
+) -> Result<()> {
+    let usage_string = build_usage_string_auval(command_name);
+    let (packages, _, _, _) = split_bundle_args(args.into_iter(), &usage_string)?;
+    let bundler_config = load_bundler_config()?.expect("Could not load bundler config");
+
+    for package in packages.into_iter() {
+        run_auval(package.as_str(), bundler_config.get(&package))?
+    }
+
+    Ok(())
+}
+
+fn run_auval(package: &str, package_config: Option<&PackageConfig>) -> Result<()> {
+    let package_config = package_config.context(format!(
+        "Missing `package_config` for AU plugin `{package}`"
+    ))?;
+
+    let au_type = package_config
+        .au_type
+        .as_ref()
+        .context(format!("Missing `au_type` for AU plugin `{package}`"))?;
+    let au_subtype = package_config
+        .au_subtype
+        .as_ref()
+        .context(format!("Missing `au_sub_type` for AU plugin `{package}`"))?;
+    let au_manufacturer_short = package_config
+        .au_manufacturer_short
+        .as_ref()
+        .context(format!(
+            "Missing `au_manufacturer_short` for AU plugin `{package}`"
+        ))?;
+
+    let success = Command::new("auval")
+        .arg("-v")
+        .arg(au_type)
+        .arg(au_subtype)
+        .arg(au_manufacturer_short)
+        .arg("-strict")
+        .status()
+        .is_ok();
+    if !success {
+        eprintln!("WARNING: Could not run `auval`")
+    }
+
+    Ok(())
 }
 
 /// Change the current directory into the Cargo workspace's root.
@@ -272,6 +344,7 @@ pub fn bundle(
     args: &[String],
     universal: bool,
     install: bool,
+    auval: bool,
     cargo_metadata: &Metadata,
 ) -> Result<()> {
     let mut build_type_dir = "debug";
@@ -357,6 +430,7 @@ pub fn bundle(
                 CompilationTarget::MacOSUniversal,
                 cargo_metadata,
                 install,
+                auval,
             )?;
         }
     } else {
@@ -397,6 +471,7 @@ to your Cargo.toml file?"#,
                 compilation_target,
                 cargo_metadata,
                 install,
+                auval,
             )?;
         }
     }
@@ -480,6 +555,7 @@ fn bundle_plugin(
     compilation_target: CompilationTarget,
     cargo_metadata: &Metadata,
     install: bool,
+    auval: bool,
 ) -> Result<()> {
     let bundle_home_dir = bundle_home(target_dir);
     let package_config = load_bundler_config()?.and_then(|c| c.get(package).cloned());
@@ -535,13 +611,17 @@ fn bundle_plugin(
 
         eprintln!("Created an AU bundle at '{}'", au_bundle_home.display());
 
-        if install {
+        if install || auval {
             install_plugin(
                 &bundle_name,
                 &au_bundle_home,
                 PluginType::Au,
                 compilation_target,
             );
+        }
+
+        if auval {
+            run_auval(package, package_config.as_ref())?;
         }
     }
     if bundle_clap {
@@ -706,10 +786,11 @@ fn load_bundler_config() -> Result<Option<BundlerConfig>> {
 fn split_bundle_args(
     args: impl Iterator<Item = String>,
     usage_string: &str,
-) -> Result<(Vec<String>, bool, Vec<String>)> {
+) -> Result<(Vec<String>, bool, bool, Vec<String>)> {
     let mut args = args.peekable();
     let mut packages = Vec::new();
     let mut install = false;
+    let mut auval = false;
     if args.peek().map(|s| s.as_str()) == Some("-p") {
         while args.peek().map(|s| s.as_str()) == Some("-p") {
             packages.push(
@@ -727,9 +808,13 @@ fn split_bundle_args(
         install = true;
         args.next();
     }
+    if args.peek().map(|s| s.as_str()) == Some("--auval") {
+        auval = true;
+        args.next();
+    }
     let other_args: Vec<_> = args.collect();
 
-    Ok((packages, install, other_args))
+    Ok((packages, install, auval, other_args))
 }
 
 /// The target we're compiling for. This is used to determine the paths and options for creating
