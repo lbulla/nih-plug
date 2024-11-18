@@ -1,6 +1,9 @@
+mod au_types;
 mod context;
 mod editor;
+pub mod layout;
 mod properties;
+mod scope;
 mod util;
 mod wrapper;
 
