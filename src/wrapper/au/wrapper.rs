@@ -4,19 +4,29 @@ use dispatch::Queue;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_foundation::NSThread;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::any::Any;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
-use crate::prelude::{AsyncExecutor, AuPlugin, Editor, ParentWindowHandle, TaskExecutor};
-use crate::wrapper::au::context::WrapperGuiContext;
+use crate::prelude::{
+    AsyncExecutor, AuPlugin, BufferConfig, Editor, ParentWindowHandle, ProcessMode, TaskExecutor,
+};
+use crate::wrapper::au::au_types::AuPreset;
+use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext};
 use crate::wrapper::au::editor::WrapperViewHolder;
 use crate::wrapper::au::properties::{PropertyDispatcher, PropertyDispatcherImpl};
+use crate::wrapper::au::scope::{InputElement, IoElement, IoElementImpl, IoScope, OutputElement};
 use crate::wrapper::au::util::ThreadWrapper;
 use crate::wrapper::au::{au_sys, AuPropertyListenerProc, NO_ERROR};
+
+// ---------- Constants ---------- //
+
+const DEFAULT_BUFFER_SIZE: u32 = 512;
+const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
 
 // ---------- Types ---------- //
 
@@ -41,18 +51,62 @@ pub(super) struct Wrapper<P: AuPlugin> {
     plugin: Mutex<P>,
     property_listeners: AtomicRefCell<HashMap<au_sys::AudioUnitPropertyID, Vec<PropertyListener>>>,
 
-    task_executor: Mutex<TaskExecutor<P>>,
+    pub(super) task_executor: Mutex<TaskExecutor<P>>,
     tasks: ArrayQueue<Task<P>>,
     background_thread: AtomicRefCell<Option<BackgroundThread<Task<P>, Self>>>,
 
     editor: AtomicRefCell<Option<Mutex<Box<dyn Editor>>>>,
     wrapper_view_holder: AtomicRefCell<WrapperViewHolder>,
+
+    buffer_config: AtomicRefCell<BufferConfig>,
+    latency_samples: AtomicU32,
+
+    // TODO: Other scopes.
+    pub(super) input_scope: RwLock<IoScope<InputElement>>,
+    pub(super) output_scope: RwLock<IoScope<OutputElement>>,
+
+    initialized: AtomicBool,
+    preset: AuPreset, // TODO
 }
 
 impl<P: AuPlugin> Wrapper<P> {
     pub(super) fn new(unit: au_sys::AudioUnit) -> Arc<Self> {
         let mut plugin = P::default();
         let task_executor = plugin.task_executor();
+        let audio_io_layout = P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default();
+
+        let mut input_scope = IoScope::new();
+        let mut output_scope = IoScope::new();
+
+        if let Some(main_input_channels) = audio_io_layout.main_input_channels {
+            input_scope.elements.push(InputElement::new(
+                audio_io_layout.main_input_name(),
+                DEFAULT_SAMPLE_RATE as _,
+                main_input_channels,
+            ));
+        }
+        if let Some(main_output_channels) = audio_io_layout.main_output_channels {
+            output_scope.elements.push(OutputElement::new(
+                audio_io_layout.main_output_name(),
+                DEFAULT_SAMPLE_RATE as _,
+                main_output_channels,
+            ));
+        }
+
+        for i in 0..audio_io_layout.aux_input_ports.len() {
+            input_scope.elements.push(InputElement::new(
+                audio_io_layout.aux_input_name(i).unwrap(),
+                DEFAULT_SAMPLE_RATE as _,
+                audio_io_layout.aux_input_ports[i],
+            ));
+        }
+        for i in 0..audio_io_layout.aux_output_ports.len() {
+            output_scope.elements.push(OutputElement::new(
+                audio_io_layout.aux_output_name(i).unwrap(),
+                DEFAULT_SAMPLE_RATE as _,
+                audio_io_layout.aux_output_ports[i],
+            ));
+        }
 
         let wrapper = Arc::new(Self {
             unit: ThreadWrapper::new(unit),
@@ -67,6 +121,20 @@ impl<P: AuPlugin> Wrapper<P> {
 
             editor: AtomicRefCell::new(None),
             wrapper_view_holder: AtomicRefCell::new(WrapperViewHolder::default()),
+
+            buffer_config: AtomicRefCell::new(BufferConfig {
+                sample_rate: DEFAULT_SAMPLE_RATE,
+                min_buffer_size: None,
+                max_buffer_size: DEFAULT_BUFFER_SIZE,
+                process_mode: ProcessMode::Realtime,
+            }),
+            latency_samples: AtomicU32::new(0),
+
+            input_scope: RwLock::new(input_scope),
+            output_scope: RwLock::new(output_scope),
+
+            initialized: AtomicBool::new(false),
+            preset: AuPreset::default(),
         });
 
         *wrapper.this.borrow_mut() = Arc::downgrade(&wrapper);
@@ -110,12 +178,31 @@ impl<P: AuPlugin> Wrapper<P> {
         self.this.borrow().upgrade().unwrap()
     }
 
+    pub(super) fn initialized(&self) -> bool {
+        self.initialized.load(Ordering::SeqCst)
+    }
+
+    // ---------- Presets ---------- //
+
+    // TODO
+    pub(super) fn preset(&self) -> &au_sys::AUPreset {
+        self.preset.as_ref()
+    }
+
+    pub(super) fn set_preset(&mut self, preset: au_sys::AUPreset) {
+        self.preset.set(preset);
+    }
+
     // ---------- Contexts ---------- //
 
     fn make_gui_context(&self) -> Arc<WrapperGuiContext<P>> {
         Arc::new(WrapperGuiContext {
             wrapper: self.as_arc(),
         })
+    }
+
+    fn make_init_context(&self) -> WrapperInitContext<P> {
+        WrapperInitContext { wrapper: self }
     }
 
     // ---------- Editor ---------- //
@@ -152,12 +239,157 @@ impl<P: AuPlugin> Wrapper<P> {
 
     // ---------- Setup ---------- //
 
-    pub(super) fn init(&self) -> au_sys::OSStatus {
+    pub(super) fn sample_rate(&self) -> f32 {
+        self.buffer_config.borrow().sample_rate
+    }
+
+    pub(super) fn set_sample_rate(&self, sample_rate: f32) {
+        let mut buffer_config = self.buffer_config.borrow_mut();
+        buffer_config.sample_rate = sample_rate;
+    }
+
+    pub(super) fn buffer_size(&self) -> u32 {
+        self.buffer_config.borrow().max_buffer_size
+    }
+
+    pub(super) fn set_buffer_size(&self, buffer_size: u32) {
+        let mut buffer_config = self.buffer_config.borrow_mut();
+        buffer_config.max_buffer_size = buffer_size;
+    }
+
+    pub(super) fn latency_seconds(&self) -> au_sys::Float64 {
+        let sample_rate = self.sample_rate() as au_sys::Float64;
+        self.latency_samples.load(Ordering::SeqCst) as au_sys::Float64 / sample_rate
+    }
+
+    pub(super) fn set_latency_samples(&self, samples: u32) {
+        let old_samples = self.latency_samples.swap(samples, Ordering::SeqCst);
+        if old_samples != samples {
+            self.call_property_listeners(
+                au_sys::kAudioUnitProperty_Latency,
+                au_sys::kAudioUnitScope_Global,
+                0,
+            );
+        }
+    }
+
+    pub(super) fn init(&mut self) -> au_sys::OSStatus {
+        let input_scope = self.input_scope.read();
+        let output_scope = self.output_scope.read();
+
+        for (i, au_layout) in P::AU_CHANNEL_LAYOUTS.iter().enumerate() {
+            let mut layout_is_valid = true;
+
+            for (j, config) in au_layout.iter().enumerate() {
+                if let Some(input_element) = input_scope.element(j as _) {
+                    if config.num_inputs != input_element.num_channels() {
+                        layout_is_valid = false;
+                        break;
+                    }
+                } else if config.num_inputs != 0 {
+                    layout_is_valid = false;
+                    break;
+                }
+
+                if let Some(output_element) = output_scope.element(j as _) {
+                    if config.num_outputs != output_element.num_channels() {
+                        layout_is_valid = false;
+                        break;
+                    }
+                } else if config.num_outputs != 0 {
+                    layout_is_valid = false;
+                    break;
+                }
+            }
+
+            // TODO: Remove unused elements if there are any?
+            if layout_is_valid {
+                let mut plugin = self.plugin.lock();
+
+                let audio_io_layout = P::AUDIO_IO_LAYOUTS[i];
+                let buffer_config = self.buffer_config.borrow();
+                let mut init_context = self.make_init_context();
+
+                let success =
+                    plugin.initialize(&audio_io_layout, &buffer_config, &mut init_context);
+                if success {
+                    plugin.reset();
+
+                    let params = plugin.params();
+                    for (_id, ptr, _group) in params.param_map().iter() {
+                        unsafe { ptr.update_smoother(buffer_config.sample_rate, true) };
+                    }
+
+                    self.initialized.store(true, Ordering::SeqCst);
+                    return NO_ERROR;
+                } else {
+                    return au_sys::kAudioUnitErr_FailedInitialization;
+                }
+            };
+        }
+
+        au_sys::kAudioUnitErr_FailedInitialization
+    }
+
+    pub(super) fn uninit(&mut self) -> au_sys::OSStatus {
+        self.plugin.lock().deactivate();
+        self.initialized.store(false, Ordering::SeqCst);
         NO_ERROR
     }
 
-    pub(super) fn uninit(&self) -> au_sys::OSStatus {
-        NO_ERROR
+    // ---------- Scopes ---------- //
+
+    pub(super) fn num_elements(&self, in_scope: au_sys::AudioUnitScope) -> Option<usize> {
+        match in_scope {
+            au_sys::kAudioUnitScope_Global => Some(1), // NOTE: AU default (fixed).
+            au_sys::kAudioUnitScope_Input => Some(self.input_scope.read().elements.len()),
+            au_sys::kAudioUnitScope_Output => Some(self.output_scope.read().elements.len()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn map_element<F>(
+        &self,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        mut f: F,
+    ) -> au_sys::OSStatus
+    where
+        F: FnMut(&IoElement) -> au_sys::OSStatus,
+    {
+        match in_scope {
+            au_sys::kAudioUnitScope_Input => self
+                .input_scope
+                .read()
+                .map_element(in_element, |element| f(element.base())),
+            au_sys::kAudioUnitScope_Output => self
+                .output_scope
+                .read()
+                .map_element(in_element, |element| f(element.base())),
+            _ => au_sys::kAudioUnitErr_InvalidScope,
+        }
+    }
+
+    pub(super) fn map_element_mut<F>(
+        &mut self,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        mut f: F,
+    ) -> au_sys::OSStatus
+    where
+        F: FnMut(&mut IoElement) -> au_sys::OSStatus,
+    {
+        match in_scope {
+            au_sys::kAudioUnitScope_Input => self
+                .input_scope
+                .write()
+                .map_element_mut(in_element, |element| f(element.base_mut())),
+            au_sys::kAudioUnitScope_Output => self
+                .output_scope
+                .write()
+                .map_element_mut(in_element, |element| f(element.base_mut())),
+            _ => au_sys::kAudioUnitErr_InvalidScope,
+        }
     }
 
     // ---------- Properties ---------- //
