@@ -60,7 +60,7 @@ assert_process_allocs = ["dep:assert_no_alloc"]
 # building additional dependencies for audio and MIDI handling.
 standalone = ["dep:baseview", "dep:clap", "dep:cpal", "dep:jack", "dep:midir", "dep:rtrb"]
 
-au = ["dep:coreaudio-sys"]
+au = ["nih_plug_derive/au", "dep:coreaudio-sys"]
 
 # Enables the `nih_export_vst3!()` macro. Enabled by default. This feature
 # exists mostly for GPL-compliance reasons, since even if you don't use the VST3

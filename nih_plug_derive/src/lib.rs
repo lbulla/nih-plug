@@ -1,7 +1,15 @@
 use proc_macro::TokenStream;
 
+#[cfg(all(feature = "au", target_os = "macos"))]
+mod au;
 mod enums;
 mod params;
+
+#[cfg(all(feature = "au", target_os = "macos"))]
+#[proc_macro_derive(PropertyDispatcherImpl)]
+pub fn au_derive_property_dispatcher_impl(input: TokenStream) -> TokenStream {
+    au::derive_property_dispatcher_impl(input)
+}
 
 /// Derive the `Enum` trait for simple enum parameters. See `EnumParam` for more information.
 #[proc_macro_derive(Enum, attributes(name, id))]
