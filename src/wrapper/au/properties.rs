@@ -6,6 +6,7 @@ use nih_plug_derive::PropertyDispatcherImpl;
 
 use crate::prelude::AuPlugin;
 use crate::wrapper::au::editor::WrapperViewCreator;
+use crate::wrapper::au::scope::ShouldAllocate;
 use crate::wrapper::au::util::utf8_to_CFStringRef;
 use crate::wrapper::au::{au_sys, Wrapper, NO_ERROR};
 
@@ -39,6 +40,7 @@ const WRAPPER_PROPERTY_ID: au_sys::AudioUnitPropertyID = 0x787725F1;
 #[allow(clippy::enum_variant_names, dead_code)]
 pub(super) enum PropertyDispatcher {
     ClassInfoProperty,
+    MakeConnectionProperty,
     SampleRateProperty,
     StreamFormatProperty,
     ElementCountProperty,
@@ -48,10 +50,14 @@ pub(super) enum PropertyDispatcher {
     AudioChannelLayoutProperty,
     TailTimeProperty,
     BypassEffectProperty,
+    LastRenderErrorProperty,
+    SetRenderCallbackProperty,
     ElementNameProperty,
     CocoaUIProperty,
     SupportedChannelLayoutTagsProperty,
     PresentPresetProperty,
+    ShouldAllocateBufferProperty,
+    LastRenderSampleTimeProperty,
 
     // NOTE: Internal property for the editor.
     WrapperProperty,
@@ -532,6 +538,45 @@ declare_property!(
     }
 );
 
+declare_property!(
+    pub(super) struct MakeConnectionProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_MakeConnection;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = &[au_sys::kAudioUnitScope_Input];
+    type Type = au_sys::AudioUnitConnection;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn set_impl(
+        wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        in_data: &Type,
+    ) -> au_sys::OSStatus {
+        wrapper
+            .input_scope
+            .write()
+            .map_element_mut(in_data.destInputNumber, |element| {
+                element.set_connection(in_data);
+                NO_ERROR
+            })
+    }
+
+    fn reset_impl(
+        _wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
 // TODO: Independent sample rates for each element
 //       though that might be uncommon for most hosts.
 //       (AU API specifications)
@@ -633,6 +678,7 @@ declare_property!(
             return au_sys::kAudioUnitErr_Initialized;
         }
 
+        let buffer_size = wrapper.buffer_size();
         let os_status = wrapper.map_element_mut(in_scope, in_element, |element| {
             let current_format = element.stream_format();
 
@@ -667,7 +713,7 @@ declare_property!(
                 return au_sys::kAudioUnitErr_FormatNotSupported;
             }
 
-            element.set_stream_format(in_data);
+            element.set_stream_format(in_data, buffer_size);
             NO_ERROR
         });
 
@@ -859,10 +905,11 @@ declare_property!(
         in_element: au_sys::AudioUnitElement,
         in_data: &Type,
     ) -> au_sys::OSStatus {
+        let buffer_size = wrapper.buffer_size();
         wrapper.map_element_mut(in_scope, in_element, |element| {
             let layout_tags = P::layout_tags(in_scope, in_element);
             if layout_tags.contains(&in_data.mChannelLayoutTag) {
-                element.set_layout(in_data);
+                element.set_layout(in_data, buffer_size);
                 NO_ERROR
             } else {
                 au_sys::kAudioUnitErr_FormatNotSupported
@@ -895,13 +942,12 @@ declare_property!(
     }
 
     fn get_impl(
-        _wrapper: &Wrapper<P>,
+        wrapper: &Wrapper<P>,
         _in_scope: au_sys::AudioUnitScope,
         _in_element: au_sys::AudioUnitElement,
         out_data: &mut Type,
     ) -> au_sys::OSStatus {
-        // TODO
-        *out_data = 0.0;
+        *out_data = wrapper.tail_seconds();
         NO_ERROR
     }
 );
@@ -940,6 +986,71 @@ declare_property!(
     ) -> au_sys::OSStatus {
         // TODO
         au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+
+    fn reset_impl(
+        _wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
+declare_property!(
+    pub(super) struct LastRenderErrorProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_LastRenderError;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::OSStatus;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        *out_data = wrapper.last_render_error();
+        NO_ERROR
+    }
+);
+
+declare_property!(
+    pub(super) struct SetRenderCallbackProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_SetRenderCallback;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = &[au_sys::kAudioUnitScope_Input];
+    type Type = au_sys::AURenderCallbackStruct;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn set_impl(
+        wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        in_data: &Type,
+    ) -> au_sys::OSStatus {
+        wrapper
+            .input_scope
+            .write()
+            .map_element_mut(in_element, |element| {
+                element.set_render_callback_struct(*in_data);
+                NO_ERROR
+            })
     }
 
     fn reset_impl(
@@ -1094,6 +1205,96 @@ declare_property!(
         _in_element: au_sys::AudioUnitElement,
     ) -> au_sys::OSStatus {
         au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
+declare_property!(
+    pub(super) struct ShouldAllocateBufferProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ShouldAllocateBuffer;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = IO_SCOPE;
+    type Type = au_sys::UInt32;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        wrapper.map_element(in_scope, in_element, |element| {
+            match element.should_allocate() {
+                ShouldAllocate::False => *out_data = 0,
+                _ => *out_data = 1,
+            }
+            NO_ERROR
+        })
+    }
+
+    fn set_impl(
+        wrapper: &mut Wrapper<P>,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        in_data: &Type,
+    ) -> au_sys::OSStatus {
+        if wrapper.initialized() {
+            return au_sys::kAudioUnitErr_Initialized;
+        }
+
+        wrapper.map_element_mut(in_scope, in_element, |element| {
+            match element.should_allocate() {
+                ShouldAllocate::Force => au_sys::kAudioUnitErr_PropertyNotWritable,
+                _ => {
+                    element.set_should_allocate(if *in_data > 0 {
+                        ShouldAllocate::True
+                    } else {
+                        ShouldAllocate::False
+                    });
+                    NO_ERROR
+                }
+            }
+        })
+    }
+
+    fn reset_impl(
+        _wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
+declare_property!(
+    pub(super) struct LastRenderSampleTimeProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_LastRenderSampleTime;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::Float64;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        *out_data = wrapper.last_render_sample_time();
+        NO_ERROR
     }
 );
 
