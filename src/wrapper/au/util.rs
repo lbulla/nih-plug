@@ -1,3 +1,6 @@
+use std::num::NonZeroU32;
+use std::ptr::null_mut;
+
 use crate::wrapper::au::au_sys;
 
 // ---------- ThreadWrapper ---------- //
@@ -99,5 +102,15 @@ pub(super) fn utf8_to_CFStringRef(utf8: &[u8]) -> au_sys::CFStringRef {
 pub(super) fn release_CFStringRef(string_ref: au_sys::CFStringRef) {
     unsafe {
         au_sys::CFRelease(string_ref as _);
+    }
+}
+
+// ---------- ChannelPointerVec ---------- //
+
+pub(super) type ChannelPointerVec = ThreadWrapper<Vec<*mut f32>>;
+
+impl ChannelPointerVec {
+    pub(super) fn from_num_buffers(num_buffers: NonZeroU32) -> Self {
+        Self::new(vec![null_mut(); num_buffers.get() as _])
     }
 }

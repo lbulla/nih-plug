@@ -33,6 +33,15 @@ pub(self) type AuPropertyListenerProc = unsafe extern "C" fn(
     in_element: au_sys::AudioUnitElement,
 );
 
+pub(self) type AuRenderCallback = unsafe extern "C" fn(
+    in_ref_con: *mut c_void,
+    io_action_flags: *mut au_sys::AudioUnitRenderActionFlags,
+    in_time_stamp: *const au_sys::AudioTimeStamp,
+    in_output_bus_num: au_sys::UInt32,
+    in_number_frames: au_sys::UInt32,
+    io_data: *mut au_sys::AudioBufferList,
+);
+
 // ---------- PluginInstance ---------- //
 
 #[repr(C)]
@@ -83,11 +92,19 @@ impl<P: AuPlugin> PluginInstance<P> {
             au_sys::kAudioUnitSetPropertySelect => {
                 Some(transmute(Self::set_property as *const c_void))
             }
+            au_sys::kAudioUnitResetSelect => Some(transmute(Self::reset as *const c_void)),
             au_sys::kAudioUnitAddPropertyListenerSelect => {
                 Some(transmute(Self::add_property_listener as *const c_void))
             }
             au_sys::kAudioUnitRemovePropertyListenerSelect => {
                 Some(transmute(Self::remove_property_listener as *const c_void))
+            }
+            au_sys::kAudioUnitRenderSelect => Some(transmute(Self::render as *const c_void)),
+            au_sys::kAudioUnitAddRenderNotifySelect => {
+                Some(transmute(Self::add_render_notify as *const c_void))
+            }
+            au_sys::kAudioUnitRemoveRenderNotifySelect => {
+                Some(transmute(Self::remove_render_notify as *const c_void))
             }
             au_sys::kAudioUnitRemovePropertyListenerWithUserDataSelect => Some(transmute(
                 Self::remove_property_listener_data as *const c_void,
@@ -145,6 +162,15 @@ impl<P: AuPlugin> PluginInstance<P> {
         wrapper.set_property(in_id, in_scope, in_element, in_data, in_data_size)
     }
 
+    unsafe extern "C" fn reset(
+        this: *mut c_void,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.reset(in_scope, in_element)
+    }
+
     unsafe extern "C" fn add_property_listener(
         this: *mut c_void,
         in_id: au_sys::AudioUnitPropertyID,
@@ -162,6 +188,42 @@ impl<P: AuPlugin> PluginInstance<P> {
     ) -> au_sys::OSStatus {
         let wrapper = Self::wrapper_from_this(this);
         wrapper.remove_property_listener(in_id, in_proc, null_mut())
+    }
+
+    unsafe extern "C" fn render(
+        this: *mut c_void,
+        io_action_flags: *mut au_sys::AudioUnitRenderActionFlags,
+        in_time_stamp: *const au_sys::AudioTimeStamp,
+        in_output_bus_num: au_sys::UInt32,
+        in_number_frames: au_sys::UInt32,
+        io_data: *mut au_sys::AudioBufferList,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.render(
+            io_action_flags,
+            in_time_stamp,
+            in_output_bus_num,
+            in_number_frames,
+            io_data,
+        )
+    }
+
+    unsafe extern "C" fn add_render_notify(
+        this: *mut c_void,
+        in_proc: AuRenderCallback,
+        in_proc_data: *mut c_void,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.add_render_notify(in_proc, in_proc_data)
+    }
+
+    unsafe extern "C" fn remove_render_notify(
+        this: *mut c_void,
+        in_proc: AuRenderCallback,
+        in_proc_data: *mut c_void,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.remove_render_notify(in_proc, in_proc_data)
     }
 
     unsafe extern "C" fn remove_property_listener_data(

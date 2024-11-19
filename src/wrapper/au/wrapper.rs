@@ -1,4 +1,6 @@
+use atomic_float::AtomicF64;
 use atomic_refcell::AtomicRefCell;
+use crossbeam::atomic::AtomicCell;
 use crossbeam::queue::ArrayQueue;
 use dispatch::Queue;
 use objc2::rc::Retained;
@@ -13,20 +15,25 @@ use std::sync::{Arc, Weak};
 
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
 use crate::prelude::{
-    AsyncExecutor, AuPlugin, BufferConfig, Editor, ParentWindowHandle, ProcessMode, TaskExecutor,
+    AsyncExecutor, AuPlugin, AuxiliaryBuffers, BufferConfig, Editor, ParentWindowHandle,
+    ProcessMode, ProcessStatus, TaskExecutor, Transport,
 };
-use crate::wrapper::au::au_types::AuPreset;
-use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext};
+use crate::wrapper::au::au_types::{AuPreset, AudioUnit};
+use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use crate::wrapper::au::editor::WrapperViewHolder;
 use crate::wrapper::au::properties::{PropertyDispatcher, PropertyDispatcherImpl};
-use crate::wrapper::au::scope::{InputElement, IoElement, IoElementImpl, IoScope, OutputElement};
+use crate::wrapper::au::scope::{
+    InputElement, IoElement, IoElementImpl, IoScope, OutputElement, ShouldAllocate,
+};
 use crate::wrapper::au::util::ThreadWrapper;
-use crate::wrapper::au::{au_sys, AuPropertyListenerProc, NO_ERROR};
+use crate::wrapper::au::{au_sys, AuPropertyListenerProc, AuRenderCallback, NO_ERROR};
+use crate::wrapper::util::buffer_management::BufferManager;
 
 // ---------- Constants ---------- //
 
 const DEFAULT_BUFFER_SIZE: u32 = 512;
 const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
+const DEFAULT_LAST_RENDER_SAMPLE_TIME: au_sys::Float64 = -1.0;
 
 // ---------- Types ---------- //
 
@@ -35,7 +42,41 @@ struct PropertyListener {
     data: ThreadWrapper<*mut c_void>,
 }
 
-enum Task<P: AuPlugin> {
+struct RenderNotify {
+    proc: AuRenderCallback,
+    data: *mut c_void,
+}
+
+struct RenderNotifies(Vec<RenderNotify>);
+
+impl RenderNotifies {
+    fn call(
+        &self,
+        io_action_flags: &mut au_sys::AudioUnitRenderActionFlags,
+        in_time_stamp: *const au_sys::AudioTimeStamp,
+        in_output_bus_num: au_sys::UInt32,
+        in_number_frames: au_sys::UInt32,
+        io_data: *mut au_sys::AudioBufferList,
+    ) {
+        for notify in self.0.iter() {
+            unsafe {
+                (notify.proc)(
+                    notify.data,
+                    &raw mut *io_action_flags,
+                    in_time_stamp,
+                    in_output_bus_num,
+                    in_number_frames,
+                    io_data,
+                );
+            }
+        }
+    }
+}
+
+unsafe impl Send for RenderNotifies {}
+unsafe impl Sync for RenderNotifies {}
+
+pub(super) enum Task<P: AuPlugin> {
     PluginTask(P::BackgroundTask),
 
     // NOTE: A `NSView` must be resized on the main thread.
@@ -45,11 +86,13 @@ enum Task<P: AuPlugin> {
 // ---------- Wrapper ---------- //
 
 pub(super) struct Wrapper<P: AuPlugin> {
-    unit: ThreadWrapper<au_sys::AudioUnit>,
+    unit: AudioUnit,
 
     this: AtomicRefCell<Weak<Wrapper<P>>>,
     plugin: Mutex<P>,
+
     property_listeners: AtomicRefCell<HashMap<au_sys::AudioUnitPropertyID, Vec<PropertyListener>>>,
+    render_notifies: AtomicRefCell<RenderNotifies>,
 
     pub(super) task_executor: Mutex<TaskExecutor<P>>,
     tasks: ArrayQueue<Task<P>>,
@@ -59,11 +102,16 @@ pub(super) struct Wrapper<P: AuPlugin> {
     wrapper_view_holder: AtomicRefCell<WrapperViewHolder>,
 
     buffer_config: AtomicRefCell<BufferConfig>,
+    buffer_manager: AtomicRefCell<BufferManager>,
     latency_samples: AtomicU32,
 
     // TODO: Other scopes.
     pub(super) input_scope: RwLock<IoScope<InputElement>>,
     pub(super) output_scope: RwLock<IoScope<OutputElement>>,
+
+    tail_seconds: AtomicCell<au_sys::Float64>,
+    last_render_error: AtomicCell<au_sys::OSStatus>,
+    last_render_sample_time: AtomicF64,
 
     initialized: AtomicBool,
     preset: AuPreset, // TODO
@@ -108,12 +156,18 @@ impl<P: AuPlugin> Wrapper<P> {
             ));
         }
 
+        for element in output_scope.elements.iter_mut().skip(1) {
+            element.set_should_allocate(ShouldAllocate::Force);
+        }
+
         let wrapper = Arc::new(Self {
-            unit: ThreadWrapper::new(unit),
+            unit: AudioUnit::new(unit),
 
             this: AtomicRefCell::new(Weak::new()),
             plugin: Mutex::new(plugin),
+
             property_listeners: AtomicRefCell::new(HashMap::new()),
+            render_notifies: AtomicRefCell::new(RenderNotifies(Vec::new())),
 
             task_executor: Mutex::new(task_executor),
             tasks: ArrayQueue::new(TASK_QUEUE_CAPACITY),
@@ -128,10 +182,18 @@ impl<P: AuPlugin> Wrapper<P> {
                 max_buffer_size: DEFAULT_BUFFER_SIZE,
                 process_mode: ProcessMode::Realtime,
             }),
+            buffer_manager: AtomicRefCell::new(BufferManager::for_audio_io_layout(
+                0,
+                audio_io_layout,
+            )),
             latency_samples: AtomicU32::new(0),
 
             input_scope: RwLock::new(input_scope),
             output_scope: RwLock::new(output_scope),
+
+            tail_seconds: AtomicCell::new(0.0),
+            last_render_error: AtomicCell::new(NO_ERROR),
+            last_render_sample_time: AtomicF64::new(DEFAULT_LAST_RENDER_SAMPLE_TIME),
 
             initialized: AtomicBool::new(false),
             preset: AuPreset::default(),
@@ -203,6 +265,13 @@ impl<P: AuPlugin> Wrapper<P> {
 
     fn make_init_context(&self) -> WrapperInitContext<P> {
         WrapperInitContext { wrapper: self }
+    }
+
+    fn make_process_context(&self, transport: Transport) -> WrapperProcessContext<P> {
+        WrapperProcessContext {
+            wrapper: self,
+            transport,
+        }
     }
 
     // ---------- Editor ---------- //
@@ -318,6 +387,18 @@ impl<P: AuPlugin> Wrapper<P> {
                     let params = plugin.params();
                     for (_id, ptr, _group) in params.param_map().iter() {
                         unsafe { ptr.update_smoother(buffer_config.sample_rate, true) };
+                    }
+
+                    *self.buffer_manager.borrow_mut() = BufferManager::for_audio_io_layout(
+                        buffer_config.max_buffer_size as _,
+                        audio_io_layout,
+                    );
+
+                    for input_element in input_scope.elements.iter() {
+                        input_element.resize_buffer(buffer_config.max_buffer_size);
+                    }
+                    for output_element in output_scope.elements.iter() {
+                        output_element.resize_buffer(buffer_config.max_buffer_size);
                     }
 
                     self.initialized.store(true, Ordering::SeqCst);
@@ -483,6 +564,260 @@ impl<P: AuPlugin> Wrapper<P> {
                 }
             }
         }
+    }
+
+    // ---------- Render ---------- //
+
+    pub(super) fn add_render_notify(
+        &self,
+        in_proc: AuRenderCallback,
+        in_proc_data: *mut c_void,
+    ) -> au_sys::OSStatus {
+        self.render_notifies.borrow_mut().0.push(RenderNotify {
+            proc: in_proc,
+            data: in_proc_data,
+        });
+        NO_ERROR
+    }
+
+    pub(super) fn remove_render_notify(
+        &self,
+        in_proc: AuRenderCallback,
+        in_proc_data: *mut c_void,
+    ) -> au_sys::OSStatus {
+        self.render_notifies
+            .borrow_mut()
+            .0
+            .retain(|notify| notify.proc != in_proc && notify.data != in_proc_data);
+        NO_ERROR
+    }
+
+    // TODO: PropertyChanged?
+    pub(super) fn tail_seconds(&self) -> au_sys::Float64 {
+        self.tail_seconds.load()
+    }
+
+    // TODO: PropertyChanged?
+    pub(super) fn last_render_error(&self) -> au_sys::OSStatus {
+        let error = self.last_render_error.load();
+        self.last_render_error.store(NO_ERROR);
+        error
+    }
+
+    fn set_last_render_error(&self, os_status: au_sys::OSStatus) {
+        if os_status != NO_ERROR && self.last_render_error.load() == NO_ERROR {
+            self.last_render_error.store(os_status);
+            self.call_property_listeners(
+                au_sys::kAudioUnitProperty_LastRenderError,
+                au_sys::kAudioUnitScope_Global,
+                0,
+            );
+        }
+    }
+
+    pub(super) fn last_render_sample_time(&self) -> au_sys::Float64 {
+        self.last_render_sample_time.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn reset(
+        &self,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        self.plugin.lock().reset();
+        self.last_render_sample_time
+            .store(DEFAULT_LAST_RENDER_SAMPLE_TIME, Ordering::SeqCst);
+        NO_ERROR
+    }
+
+    pub(super) unsafe fn render_impl(
+        &self,
+        io_action_flags: *mut au_sys::AudioUnitRenderActionFlags,
+        in_time_stamp: *const au_sys::AudioTimeStamp,
+        in_output_bus_num: au_sys::UInt32,
+        in_number_frames: au_sys::UInt32,
+        io_data: *mut au_sys::AudioBufferList,
+    ) -> au_sys::OSStatus {
+        let output_scope = self.output_scope.read();
+        if let Some(current_output_element) = output_scope.element(in_output_bus_num) {
+            if (*io_data).mBuffers[0].mData.is_null()
+                || current_output_element.should_allocate() != ShouldAllocate::False
+            {
+                current_output_element.prepare_buffer_list(in_number_frames);
+            } else {
+                current_output_element.copy_buffer_list_from(io_data);
+            }
+
+            // TODO: Is this really stable in all cases?
+            // NOTE: All output elements are rendered in one go.
+            //       Therefore, we just copy the buffer when `mSampleTime` is the same.
+            if self.last_render_sample_time() != (*in_time_stamp).mSampleTime {
+                let input_scope = self.input_scope.read();
+                let mut buffer_is_valid = true;
+
+                for (i, input_element) in input_scope.elements.iter().enumerate() {
+                    if input_element.pull_input(
+                        io_action_flags,
+                        in_time_stamp,
+                        i as _,
+                        in_number_frames,
+                    ) != NO_ERROR
+                    {
+                        buffer_is_valid = false;
+                        break;
+                    }
+                }
+
+                if buffer_is_valid {
+                    for (i, output_element) in output_scope.elements.iter().enumerate() {
+                        if i as au_sys::UInt32 != in_output_bus_num {
+                            output_element.prepare_buffer_list(in_number_frames);
+                        }
+                    }
+
+                    let mut buffer_manager = self.buffer_manager.borrow_mut();
+                    let buffers =
+                        buffer_manager.create_buffers(0, in_number_frames as _, |buffer_source| {
+                            for (i, input_element) in input_scope.elements.iter().enumerate() {
+                                let pointers = if i == 0 {
+                                    &mut buffer_source.main_input_channel_pointers
+                                } else {
+                                    &mut buffer_source.aux_input_channel_pointers[i - 1]
+                                };
+                                *pointers = input_element.create_channel_pointers();
+                            }
+
+                            for (i, output_element) in output_scope.elements.iter().enumerate() {
+                                let pointers = if i == 0 {
+                                    &mut buffer_source.main_output_channel_pointers
+                                } else {
+                                    &mut buffer_source.aux_output_channel_pointers[i - 1]
+                                };
+                                *pointers = output_element.create_channel_pointers();
+                            }
+                        });
+
+                    let sample_rate = self.sample_rate();
+                    let mut aux = AuxiliaryBuffers {
+                        inputs: buffers.aux_inputs,
+                        outputs: buffers.aux_outputs,
+                    };
+                    let transport = Transport::new(sample_rate);
+                    let mut context = self.make_process_context(transport);
+
+                    let process_status =
+                        self.plugin
+                            .lock()
+                            .process(buffers.main_buffer, &mut aux, &mut context);
+                    match process_status {
+                        ProcessStatus::Error(err) => {
+                            nih_debug_assert_failure!("Process error: {}", err);
+                            // TODO: What OSStatus?
+                            self.tail_seconds.store(0.0);
+                        }
+                        ProcessStatus::Normal => {
+                            self.tail_seconds.store(0.0);
+                        }
+                        ProcessStatus::Tail(tail) => {
+                            self.tail_seconds
+                                .store(tail as au_sys::Float64 / sample_rate as au_sys::Float64);
+                        }
+                        ProcessStatus::KeepAlive => {
+                            self.tail_seconds.store(au_sys::Float64::MAX);
+                        }
+                    }
+                }
+
+                self.last_render_sample_time
+                    .store((*in_time_stamp).mSampleTime, Ordering::SeqCst);
+            }
+
+            if (*io_data).mBuffers[0].mData.is_null() {
+                current_output_element.copy_buffer_list_to(io_data);
+            } else {
+                current_output_element.copy_buffer_to(io_data);
+            }
+
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidElement
+        }
+    }
+
+    pub(super) unsafe fn render(
+        &self,
+        mut io_action_flags: *mut au_sys::AudioUnitRenderActionFlags,
+        in_time_stamp: *const au_sys::AudioTimeStamp,
+        in_output_bus_num: au_sys::UInt32,
+        in_number_frames: au_sys::UInt32,
+        io_data: *mut au_sys::AudioBufferList,
+    ) -> au_sys::OSStatus {
+        // ---------- Prepare ---------- //
+
+        if in_time_stamp.is_null() || io_data.is_null() {
+            let os_status = au_sys::kAudio_ParamError;
+            self.set_last_render_error(os_status);
+            return os_status;
+        }
+
+        let mut temp_io_action_flags;
+        if io_action_flags.is_null() {
+            temp_io_action_flags = au_sys::AudioUnitRenderActionFlags::default();
+            io_action_flags = &raw mut temp_io_action_flags;
+        }
+        if ((*io_action_flags) & au_sys::kAudioUnitRenderAction_DoNotCheckRenderArgs) == 0 {
+            if in_number_frames > self.buffer_size() {
+                let os_status = au_sys::kAudioUnitErr_TooManyFramesToProcess;
+                self.set_last_render_error(os_status);
+                return os_status;
+            }
+        }
+
+        let render_notifies = self.render_notifies.borrow();
+        let has_render_notifies = render_notifies.0.len() > 0;
+        if has_render_notifies {
+            let mut notify_io_action_flags =
+                (*io_action_flags) | au_sys::kAudioUnitRenderAction_PreRender;
+
+            render_notifies.call(
+                &mut notify_io_action_flags,
+                in_time_stamp,
+                in_output_bus_num,
+                in_number_frames,
+                io_data,
+            );
+        }
+
+        // ---------- Render ---------- //
+
+        let os_status = self.render_impl(
+            io_action_flags,
+            in_time_stamp,
+            in_output_bus_num,
+            in_number_frames,
+            io_data,
+        );
+
+        // ---------- Finish ---------- //
+
+        if has_render_notifies {
+            let mut notify_io_action_flags =
+                (*io_action_flags) | au_sys::kAudioUnitRenderAction_PostRender;
+            if os_status != NO_ERROR {
+                notify_io_action_flags |= au_sys::kAudioUnitRenderAction_PostRenderError;
+            }
+
+            render_notifies.call(
+                &mut notify_io_action_flags,
+                in_time_stamp,
+                in_output_bus_num,
+                in_number_frames,
+                io_data,
+            );
+        }
+
+        self.set_last_render_error(os_status);
+        os_status
     }
 }
 
