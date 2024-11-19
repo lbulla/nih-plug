@@ -1,3 +1,4 @@
+mod properties;
 mod util;
 mod wrapper;
 
@@ -16,6 +17,16 @@ use crate::prelude::AuPlugin;
 // ---------- Constants ---------- //
 
 pub(self) const NO_ERROR: au_sys::OSStatus = au_sys::noErr as _;
+
+// ---------- Types ---------- //
+
+pub(self) type AuPropertyListenerProc = unsafe extern "C" fn(
+    in_ref_con: *mut c_void,
+    in_unit: au_sys::AudioUnit,
+    in_id: au_sys::AudioUnitPropertyID,
+    in_scope: au_sys::AudioUnitScope,
+    in_element: au_sys::AudioUnitElement,
+);
 
 // ---------- PluginInstance ---------- //
 
@@ -58,6 +69,24 @@ impl<P: AuPlugin> PluginInstance<P> {
         match selector as c_uint {
             au_sys::kAudioUnitInitializeSelect => Some(transmute(Self::init as *const c_void)),
             au_sys::kAudioUnitUninitializeSelect => Some(transmute(Self::uninit as *const c_void)),
+            au_sys::kAudioUnitGetPropertyInfoSelect => {
+                Some(transmute(Self::get_property_info as *const c_void))
+            }
+            au_sys::kAudioUnitGetPropertySelect => {
+                Some(transmute(Self::get_property as *const c_void))
+            }
+            au_sys::kAudioUnitSetPropertySelect => {
+                Some(transmute(Self::set_property as *const c_void))
+            }
+            au_sys::kAudioUnitAddPropertyListenerSelect => {
+                Some(transmute(Self::add_property_listener as *const c_void))
+            }
+            au_sys::kAudioUnitRemovePropertyListenerSelect => {
+                Some(transmute(Self::remove_property_listener as *const c_void))
+            }
+            au_sys::kAudioUnitRemovePropertyListenerWithUserDataSelect => Some(transmute(
+                Self::remove_property_listener_data as *const c_void,
+            )),
             _ => None,
         }
     }
@@ -70,6 +99,74 @@ impl<P: AuPlugin> PluginInstance<P> {
     unsafe extern "C" fn uninit(this: *mut c_void) -> au_sys::OSStatus {
         let wrapper = Self::wrapper_from_this(this);
         wrapper.uninit()
+    }
+
+    // NOTE: out_data_size == null || out_writable == null => assign no value (individually)
+    unsafe extern "C" fn get_property_info(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        out_data_size: *mut au_sys::UInt32,
+        out_writable: *mut au_sys::Boolean,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.get_property_info(in_id, in_scope, in_element, out_data_size, out_writable)
+    }
+
+    // NOTE: out_data == null => assign only the size
+    unsafe extern "C" fn get_property(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        out_data: *mut c_void,
+        io_data_size: *mut au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.get_property(in_id, in_scope, in_element, out_data, io_data_size)
+    }
+
+    // NOTE: in_data == null && in_data_size == 0 => reset (for values without a default value)
+    unsafe extern "C" fn set_property(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        in_data: *const c_void,
+        in_data_size: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.set_property(in_id, in_scope, in_element, in_data, in_data_size)
+    }
+
+    unsafe extern "C" fn add_property_listener(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_proc: AuPropertyListenerProc,
+        in_proc_data: *mut c_void,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.add_property_listener(in_id, in_proc, in_proc_data)
+    }
+
+    unsafe extern "C" fn remove_property_listener(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_proc: AuPropertyListenerProc,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.remove_property_listener(in_id, in_proc, null_mut())
+    }
+
+    unsafe extern "C" fn remove_property_listener_data(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_proc: AuPropertyListenerProc,
+        in_proc_data: *mut c_void,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.remove_property_listener(in_id, in_proc, in_proc_data)
     }
 
     unsafe fn wrapper_from_this(this: *mut c_void) -> &'static mut Wrapper<P> {
