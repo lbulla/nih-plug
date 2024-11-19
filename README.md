@@ -18,10 +18,10 @@ subject to a lot of changes.
 
 - AU plugins can be built and loaded into a DAW
 - The Editor can be opened and resized internally (VIZIA only)
+- Audio is being processed
 
 ### Roadmap
 
-- Audio
 - Parameters
 - State
 - Transport
