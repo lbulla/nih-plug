@@ -114,7 +114,7 @@ impl<E: IcedEditor> Application for IcedEditorWrapperApplication<E> {
                 self.parameter_updates_receiver.clone(),
                 |parameter_updates_receiver| match parameter_updates_receiver.try_recv() {
                     Ok(_) => futures::future::ready((
-                        Some(Message::ParameterUpdate),
+                        Message::ParameterUpdate,
                         parameter_updates_receiver,
                     ))
                     .boxed(),

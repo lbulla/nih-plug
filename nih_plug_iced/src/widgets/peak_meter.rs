@@ -6,11 +6,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::backend::Renderer;
+use crate::renderer::BorderRadius;
 use crate::renderer::Renderer as GraphicsRenderer;
 use crate::text::Renderer as TextRenderer;
 use crate::{
     alignment, layout, renderer, text, Background, Color, Element, Font, Layout, Length, Point,
-    Rectangle, Size, Widget,
+    Rectangle, Size, Theme, Tree, Widget,
 };
 
 /// The thickness of this widget's borders.
@@ -61,8 +62,8 @@ impl<'a, Message> PeakMeter<'a, Message> {
 
             hold_time: None,
 
-            width: Length::Units(180),
-            height: Length::Units(30),
+            width: Length::from(180),
+            height: Length::from(30),
             text_size: None,
             font: <Renderer as TextRenderer>::Font::default(),
 
@@ -122,7 +123,9 @@ where
 
     fn draw(
         &self,
+        _tree: &Tree,
         renderer: &mut Renderer,
+        _theme: &Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         _cursor_position: Point,
@@ -181,7 +184,7 @@ where
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: tick_bounds,
-                    border_radius: 0.0,
+                    border_radius: BorderRadius::from(0.0),
                     border_width: 0.0,
                     border_color: Color::TRANSPARENT,
                 },
@@ -211,7 +214,7 @@ where
                         width: TICK_WIDTH,
                         height: bar_bounds.height - (BORDER_WIDTH * 2.0),
                     },
-                    border_radius: 0.0,
+                    border_radius: BorderRadius::from(0.0),
                     border_width: 0.0,
                     border_color: Color::TRANSPARENT,
                 },
@@ -223,7 +226,7 @@ where
         renderer.fill_quad(
             renderer::Quad {
                 bounds: bar_bounds,
-                border_radius: 0.0,
+                border_radius: BorderRadius::from(0.0),
                 border_width: BORDER_WIDTH,
                 border_color: Color::BLACK,
             },
@@ -242,7 +245,7 @@ where
                         width: TICK_WIDTH,
                         height: ticks_bounds.height * 0.3,
                     },
-                    border_radius: 0.0,
+                    border_radius: BorderRadius::from(0.0),
                     border_width: 0.0,
                     border_color: Color::TRANSPARENT,
                 },
@@ -271,7 +274,7 @@ where
 
         // Every proper graph needs a unit label
         let zero_db_x_coordinate = db_to_x_coord(0.0);
-        let zero_db_text_width = renderer.measure_width("0", text_size, self.font);
+        let zero_db_text_width = renderer.measure_width("0", text_size.into(), self.font);
         renderer.fill_text(text::Text {
             // The spacing looks a bit off if we start with a space here so we'll add a little
             // offset to the x-coordinate instead

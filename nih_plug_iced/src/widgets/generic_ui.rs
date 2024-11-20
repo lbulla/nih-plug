@@ -4,6 +4,7 @@
 use atomic_refcell::AtomicRefCell;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter, Result};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -13,8 +14,8 @@ use super::{ParamMessage, ParamSlider};
 use crate::backend::Renderer;
 use crate::text::Renderer as TextRenderer;
 use crate::{
-    alignment, event, layout, renderer, widget, Alignment, Clipboard, Element, Event, Layout,
-    Length, Point, Rectangle, Row, Scrollable, Shell, Space, Text, Widget,
+    alignment, event, layout, renderer, Alignment, Clipboard, Column, Element, Event, Layout,
+    Length, Point, Rectangle, Row, Scrollable, Shell, Space, Text, Theme, Tree, Widget,
 };
 
 /// A widget that can be used to create a generic UI with. This is used in conjuction with empty
@@ -71,11 +72,25 @@ pub struct GenericUi<'a, W: ParamWidget> {
     _phantom: PhantomData<W>,
 }
 
+struct ScrollableTree(AtomicRefCell<Tree>);
+
+impl Debug for ScrollableTree {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        self.0.borrow().fmt(f)
+    }
+}
+
+impl Default for ScrollableTree {
+    fn default() -> Self {
+        Self(AtomicRefCell::new(Tree::empty()))
+    }
+}
+
 /// State for a [`GenericUi`].
 #[derive(Debug, Default)]
 pub struct State<W: ParamWidget> {
     /// The internal state for each parameter's widget.
-    scrollable_state: AtomicRefCell<widget::scrollable::State>,
+    scrollable_tree: ScrollableTree,
     /// The internal state for each parameter's widget.
     widget_state: AtomicRefCell<HashMap<ParamPtr, W::State>>,
 }
@@ -135,7 +150,6 @@ where
     /// mutably borrow the `Scrollable`'s widget state.
     fn with_scrollable_widget<T, R, F>(
         &'a self,
-        scrollable_state: &'a mut widget::scrollable::State,
         widget_state: &'a mut HashMap<ParamPtr, W::State>,
         renderer: R,
         f: F,
@@ -145,14 +159,13 @@ where
         R: Borrow<Renderer>,
     {
         let text_size = renderer.borrow().default_size();
-        let spacing = (text_size as f32 * 0.2).round() as u16;
-        let padding = (text_size as f32 * 0.5).round() as u16;
+        let spacing = (text_size * 0.2).round() as u16;
+        let padding = (text_size * 0.5).round() as u16;
 
-        let mut scrollable = Scrollable::new(scrollable_state)
+        let mut content = Column::new()
             .width(self.width)
             .height(self.height)
-            .max_width(self.max_width)
-            .max_height(self.max_height)
+            .max_width(self.max_width as u16)
             .spacing(spacing)
             .padding(padding)
             .align_items(Alignment::Center);
@@ -170,18 +183,7 @@ where
             }
         }
 
-        for (_, param_ptr, _) in param_map {
-            let flags = unsafe { param_ptr.flags() };
-            if flags.contains(ParamFlags::HIDE_IN_GENERIC_UI) {
-                continue;
-            }
-
-            // SAFETY: We only borrow each item once, and the plugin framework statically asserted
-            //         that parameter indices are unique and this widget state cannot outlive this
-            //         function
-            let widget_state: &'a mut W::State =
-                unsafe { &mut *(widget_state.get_mut(&param_ptr).unwrap() as *mut _) };
-
+        for (param_ptr, widget_state) in widget_state.iter_mut() {
             // Show the label next to the parameter for better use of the space
             let mut row = Row::new()
                 .width(Length::Fill)
@@ -189,20 +191,24 @@ where
                 .spacing(spacing * 2)
                 .push(
                     Text::new(unsafe { param_ptr.name() })
-                        .height(20.into())
+                        .height(20)
                         .width(Length::Fill)
                         .horizontal_alignment(alignment::Horizontal::Right)
                         .vertical_alignment(alignment::Vertical::Center),
                 )
-                .push(unsafe { W::into_widget_element_raw(&param_ptr, widget_state) });
+                .push(unsafe { W::into_widget_element_raw(param_ptr, widget_state) });
             if self.pad_scrollbar {
-                // There's already spacing applied, so this element doesn't actually need to hae any
-                // size of its own
-                row = row.push(Space::with_width(Length::Units(0)));
+                // There's already spacing applied, so this element doesn't actually need to have
+                // any size of its own
+                row = row.push(Space::with_width(Length::from(0)));
             }
 
-            scrollable = scrollable.push(row);
+            content = content.push(row);
         }
+
+        let scrollable = Scrollable::new(content)
+            .width(self.width)
+            .height(self.height);
 
         f(scrollable, renderer)
     }
@@ -221,38 +227,43 @@ where
     }
 
     fn layout(&self, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
-        let mut scrollable_state = self.state.scrollable_state.borrow_mut();
+        let limits = limits
+            .max_width(self.max_width as _)
+            .max_height(self.max_height as _);
         let mut widget_state = self.state.widget_state.borrow_mut();
-        self.with_scrollable_widget(
-            &mut scrollable_state,
-            &mut widget_state,
-            renderer,
-            |scrollable, _| scrollable.layout(renderer, limits),
-        )
+        self.with_scrollable_widget(&mut widget_state, renderer, |scrollable, _| {
+            scrollable.layout(renderer, &limits)
+        })
     }
 
     fn draw(
         &self,
+        _tree: &Tree,
         renderer: &mut Renderer,
+        theme: &Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         cursor_position: Point,
         viewport: &Rectangle,
     ) {
-        let mut scrollable_state = self.state.scrollable_state.borrow_mut();
+        let scrollable_tree = self.state.scrollable_tree.0.borrow_mut();
         let mut widget_state = self.state.widget_state.borrow_mut();
-        self.with_scrollable_widget(
-            &mut scrollable_state,
-            &mut widget_state,
-            renderer,
-            |scrollable, renderer| {
-                scrollable.draw(renderer, style, layout, cursor_position, viewport)
-            },
-        )
+        self.with_scrollable_widget(&mut widget_state, renderer, |scrollable, renderer| {
+            scrollable.draw(
+                &scrollable_tree,
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor_position,
+                viewport,
+            )
+        })
     }
 
     fn on_event(
         &mut self,
+        _tree: &mut Tree,
         event: Event,
         layout: Layout<'_>,
         cursor_position: Point,
@@ -260,16 +271,19 @@ where
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, ParamMessage>,
     ) -> event::Status {
-        let mut scrollable_state = self.state.scrollable_state.borrow_mut();
+        let mut scrollable_tree = self.state.scrollable_tree.0.borrow_mut();
         let mut widget_state = self.state.widget_state.borrow_mut();
-        self.with_scrollable_widget(
-            &mut scrollable_state,
-            &mut widget_state,
-            renderer,
-            |mut scrollable, _| {
-                scrollable.on_event(event, layout, cursor_position, renderer, clipboard, shell)
-            },
-        )
+        self.with_scrollable_widget(&mut widget_state, renderer, |mut scrollable, _| {
+            scrollable.on_event(
+                &mut scrollable_tree,
+                event,
+                layout,
+                cursor_position,
+                renderer,
+                clipboard,
+                shell,
+            )
+        })
     }
 }
 

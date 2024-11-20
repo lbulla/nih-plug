@@ -81,14 +81,14 @@ impl IcedEditor for GainEditor {
                 Text::new("Gain GUI")
                     .font(assets::NOTO_SANS_LIGHT)
                     .size(40)
-                    .height(50.into())
+                    .height(50)
                     .width(Length::Fill)
                     .horizontal_alignment(alignment::Horizontal::Center)
                     .vertical_alignment(alignment::Vertical::Bottom),
             )
             .push(
                 Text::new("Gain")
-                    .height(20.into())
+                    .height(20)
                     .width(Length::Fill)
                     .horizontal_alignment(alignment::Horizontal::Center)
                     .vertical_alignment(alignment::Vertical::Center),
@@ -97,7 +97,7 @@ impl IcedEditor for GainEditor {
                 nih_widgets::ParamSlider::new(&mut self.gain_slider_state, &self.params.gain)
                     .map(Message::ParamUpdate),
             )
-            .push(Space::with_height(10.into()))
+            .push(Space::with_height(10))
             .push(
                 nih_widgets::PeakMeter::new(
                     &mut self.peak_meter_state,
@@ -108,8 +108,8 @@ impl IcedEditor for GainEditor {
             .into()
     }
 
-    fn background_color(&self) -> nih_plug_iced::Color {
-        nih_plug_iced::Color {
+    fn background_color(&self) -> Color {
+        Color {
             r: 0.98,
             g: 0.98,
             b: 0.98,

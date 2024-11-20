@@ -5,7 +5,6 @@ use crossbeam::atomic::AtomicCell;
 use crossbeam::channel;
 pub use iced_baseview::*;
 use nih_plug::prelude::{Editor, GuiContext, ParentWindowHandle};
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -25,32 +24,6 @@ pub(crate) struct IcedEditorWrapper<E: IcedEditor> {
     pub(crate) parameter_updates_receiver: Arc<channel::Receiver<ParameterUpdate>>,
 }
 
-/// This version of `baseview` uses a different version of `raw_window_handle than NIH-plug, so we
-/// need to adapt it ourselves.
-struct ParentWindowHandleAdapter(nih_plug::editor::ParentWindowHandle);
-
-unsafe impl HasRawWindowHandle for ParentWindowHandleAdapter {
-    fn raw_window_handle(&self) -> RawWindowHandle {
-        match self.0 {
-            ParentWindowHandle::X11Window(window) => {
-                let mut handle = raw_window_handle::XcbHandle::empty();
-                handle.window = window;
-                RawWindowHandle::Xcb(handle)
-            }
-            ParentWindowHandle::AppKitNsView(ns_view) => {
-                let mut handle = raw_window_handle::AppKitHandle::empty();
-                handle.ns_view = ns_view;
-                RawWindowHandle::AppKit(handle)
-            }
-            ParentWindowHandle::Win32Hwnd(hwnd) => {
-                let mut handle = raw_window_handle::Win32Handle::empty();
-                handle.hwnd = hwnd;
-                RawWindowHandle::Win32(handle)
-            }
-        }
-    }
-}
-
 impl<E: IcedEditor> Editor for IcedEditorWrapper<E> {
     fn spawn(
         &self,
@@ -63,7 +36,7 @@ impl<E: IcedEditor> Editor for IcedEditorWrapper<E> {
         // TODO: iced_baseview does not have gracefuly error handling for context creation failures.
         //       This will panic if the context could not be created.
         let window = IcedWindow::<wrapper::IcedEditorWrapperApplication<E>>::open_parented(
-            &ParentWindowHandleAdapter(parent),
+            &parent,
             Settings {
                 window: WindowOpenOptions {
                     title: String::from("iced window"),
@@ -154,7 +127,7 @@ impl<E: IcedEditor> Editor for IcedEditorWrapper<E> {
 /// The window handle used for [`IcedEditorWrapper`].
 struct IcedEditorHandle<Message: 'static + Send> {
     iced_state: Arc<IcedState>,
-    window: iced_baseview::WindowHandle<Message>,
+    window: WindowHandle<Message>,
 }
 
 /// The window handle enum stored within 'WindowHandle' contains raw pointers. Is there a way around
