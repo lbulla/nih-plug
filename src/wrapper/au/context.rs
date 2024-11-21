@@ -6,7 +6,7 @@ use crate::prelude::{
     AuPlugin, GuiContext, InitContext, ParamPtr, PluginApi, PluginNoteEvent, PluginState,
     ProcessContext, Transport,
 };
-use crate::wrapper::au::wrapper::Task;
+use crate::wrapper::au::wrapper::{EditorParamEvent, Task};
 use crate::wrapper::au::Wrapper;
 
 // ---------- WrapperGuiContext ---------- //
@@ -24,11 +24,47 @@ impl<P: AuPlugin> GuiContext for WrapperGuiContext<P> {
         self.wrapper.request_resize()
     }
 
-    unsafe fn raw_begin_set_parameter(&self, _param: ParamPtr) {}
+    unsafe fn raw_begin_set_parameter(&self, param: ParamPtr) {
+        match self.wrapper.param_ptr_to_hash(&param) {
+            Some(hash) => {
+                self.wrapper
+                    .post_editor_param_event_gui(EditorParamEvent::BeginGesture {
+                        param_hash: *hash,
+                    });
+            }
+            _ => {
+                nih_debug_assert_failure!("`raw_begin_set_parameter` called with an unknown param")
+            }
+        }
+    }
 
-    unsafe fn raw_set_parameter_normalized(&self, _param: ParamPtr, _normalized: f32) {}
+    unsafe fn raw_set_parameter_normalized(&self, param: ParamPtr, normalized: f32) {
+        match self.wrapper.param_ptr_to_hash(&param) {
+            Some(hash) => {
+                self.wrapper
+                    .post_editor_param_event_gui(EditorParamEvent::SetValueFromEditor {
+                        param_hash: *hash,
+                        param,
+                        normalized_value: normalized,
+                    });
+            }
+            _ => nih_debug_assert_failure!(
+                "`raw_set_parameter_normalized` called with an unknown param"
+            ),
+        }
+    }
 
-    unsafe fn raw_end_set_parameter(&self, _param: ParamPtr) {}
+    unsafe fn raw_end_set_parameter(&self, param: ParamPtr) {
+        match self.wrapper.param_ptr_to_hash(&param) {
+            Some(hash) => {
+                self.wrapper
+                    .post_editor_param_event_gui(EditorParamEvent::EndGesture {
+                        param_hash: *hash,
+                    });
+            }
+            _ => nih_debug_assert_failure!("`raw_end_set_parameter` called with an unknown param"),
+        }
+    }
 
     fn get_state(&self) -> PluginState {
         PluginState {

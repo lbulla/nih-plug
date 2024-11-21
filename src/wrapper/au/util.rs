@@ -1,6 +1,8 @@
+use std::ffi::{c_void, CStr};
 use std::num::NonZeroU32;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 
+use crate::prelude::Param;
 use crate::wrapper::au::au_sys;
 
 // ---------- ThreadWrapper ---------- //
@@ -92,6 +94,17 @@ pub(super) fn str_to_CFStringRef(string: &str) -> au_sys::CFStringRef {
     }
 }
 
+#[allow(non_snake_case)]
+pub(super) fn CFStringRef_to_string(string_ref: au_sys::CFStringRef) -> String {
+    let cstr = unsafe {
+        CStr::from_ptr(au_sys::CFStringGetCStringPtr(
+            string_ref,
+            au_sys::kCFStringEncodingUTF8,
+        ))
+    };
+    cstr.to_str().unwrap().to_owned()
+}
+
 #[must_use]
 #[allow(non_snake_case)]
 pub(super) fn utf8_to_CFStringRef(utf8: &[u8]) -> au_sys::CFStringRef {
@@ -102,6 +115,29 @@ pub(super) fn utf8_to_CFStringRef(utf8: &[u8]) -> au_sys::CFStringRef {
 pub(super) fn release_CFStringRef(string_ref: au_sys::CFStringRef) {
     unsafe {
         au_sys::CFRelease(string_ref as _);
+    }
+}
+
+#[must_use]
+pub(super) fn value_strings_for_param<P: Param>(param: &P) -> au_sys::CFArrayRef {
+    let num_strings = param
+        .step_count()
+        .expect("`param` must have a step count for `value_strings_for_param`")
+        + 1;
+
+    let mut strings = Vec::with_capacity(num_strings);
+    for i in 0..num_strings {
+        let string = param.normalized_value_to_string(i as f32 / (num_strings - 1) as f32, false);
+        strings.push(str_to_CFStringRef(string.as_str()) as *const c_void);
+    }
+
+    unsafe {
+        au_sys::CFArrayCreate(
+            au_sys::kCFAllocatorDefault,
+            strings.as_mut_ptr(),
+            strings.len() as _,
+            null(),
+        )
     }
 }
 

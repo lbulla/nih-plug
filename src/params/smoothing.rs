@@ -1,5 +1,7 @@
 //! Utilities to handle smoothing parameter changes over time.
 
+use atomic_refcell::AtomicRefCell;
+use std::fmt::{Debug, Error, Formatter};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
@@ -39,6 +41,29 @@ pub enum SmoothingStyle {
     Exponential(f32),
 }
 
+// FIXME: Used for the AU wrapper. See: `ScheduleParamRamp`.
+pub struct AtomicSmoothingStyle(AtomicRefCell<SmoothingStyle>);
+
+impl AtomicSmoothingStyle {
+    pub fn new(style: SmoothingStyle) -> Self {
+        Self(AtomicRefCell::new(style))
+    }
+
+    pub fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    pub fn as_ref(&self) -> &AtomicRefCell<SmoothingStyle> {
+        &self.0
+    }
+}
+
+impl Debug for AtomicSmoothingStyle {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        self.0.borrow().fmt(f)
+    }
+}
+
 /// A smoother, providing a smoothed value for each sample.
 //
 // TODO: We need to use atomics here so we can share the params object with the GUI. Is there a
@@ -46,7 +71,7 @@ pub enum SmoothingStyle {
 #[derive(Debug)]
 pub struct Smoother<T: Smoothable> {
     /// The kind of snoothing that needs to be applied, if any.
-    pub style: SmoothingStyle,
+    pub style: AtomicSmoothingStyle,
     /// The number of steps of smoothing left to take.
     ///
     // This is a signed integer because we can skip multiple steps, which would otherwise make it
@@ -181,7 +206,7 @@ pub trait Smoothable: Default + Clone + Copy {
 impl<T: Smoothable> Default for Smoother<T> {
     fn default() -> Self {
         Self {
-            style: SmoothingStyle::None,
+            style: AtomicSmoothingStyle::new(SmoothingStyle::None),
             steps_left: AtomicI32::new(0),
             step_size: Default::default(),
             current: AtomicF32::new(0.0),
@@ -217,7 +242,7 @@ impl<T: Smoothable> Smoother<T> {
     /// Use the specified style for the smoothing.
     pub fn new(style: SmoothingStyle) -> Self {
         Self {
-            style,
+            style: AtomicSmoothingStyle::new(style),
             ..Default::default()
         }
     }
@@ -260,14 +285,17 @@ impl<T: Smoothable> Smoother<T> {
     pub fn set_target(&self, sample_rate: f32, target: T) {
         T::atomic_store(&self.target, target);
 
-        let steps_left = self.style.num_steps(sample_rate) as i32;
+        let steps_left = self.style.0.borrow().num_steps(sample_rate) as i32;
         self.steps_left.store(steps_left, Ordering::Relaxed);
 
         let current = self.current.load(Ordering::Relaxed);
         let target_f32 = target.to_f32();
         self.step_size.store(
             if steps_left > 0 {
-                self.style.step_size(current, target_f32, steps_left as u32)
+                self.style
+                    .0
+                    .borrow()
+                    .step_size(current, target_f32, steps_left as u32)
             } else {
                 0.0
             },
@@ -300,7 +328,7 @@ impl<T: Smoothable> Smoother<T> {
                 self.steps_left.store(0, Ordering::Relaxed);
                 target_f32
             } else {
-                self.style.next(current, target_f32, step_size)
+                self.style.0.borrow().next(current, target_f32, step_size)
             };
             self.current.store(new, Ordering::Relaxed);
 
@@ -335,7 +363,10 @@ impl<T: Smoothable> Smoother<T> {
                 self.steps_left.store(0, Ordering::Relaxed);
                 target_f32
             } else {
-                self.style.next_step(current, target_f32, step_size, steps)
+                self.style
+                    .0
+                    .borrow()
+                    .next_step(current, target_f32, step_size, steps)
             };
             self.current.store(new, Ordering::Relaxed);
 
@@ -386,7 +417,7 @@ impl<T: Smoothable> Smoother<T> {
                 // This is the same as calling `next()` `num_smoothed_values` times, but with some
                 // conditionals optimized out
                 block_values[..num_smoothed_values - 1].fill_with(|| {
-                    current = self.style.next(current, target_f32, step_size);
+                    current = self.style.0.borrow().next(current, target_f32, step_size);
                     T::from_f32(current)
                 });
 
@@ -396,7 +427,7 @@ impl<T: Smoothable> Smoother<T> {
                 block_values[num_smoothed_values - 1] = target;
             } else {
                 block_values[..num_smoothed_values].fill_with(|| {
-                    current = self.style.next(current, target_f32, step_size);
+                    current = self.style.0.borrow().next(current, target_f32, step_size);
                     T::from_f32(current)
                 });
             }
@@ -449,7 +480,7 @@ impl<T: Smoothable> Smoother<T> {
                     .enumerate()
                     .take(num_smoothed_values - 1)
                 {
-                    current = self.style.next(current, target_f32, step_size);
+                    current = self.style.0.borrow().next(current, target_f32, step_size);
                     *value = f(idx, current);
                 }
 
@@ -461,7 +492,7 @@ impl<T: Smoothable> Smoother<T> {
                     .enumerate()
                     .take(num_smoothed_values)
                 {
-                    current = self.style.next(current, target_f32, step_size);
+                    current = self.style.0.borrow().next(current, target_f32, step_size);
                     *value = f(idx, current);
                 }
             }

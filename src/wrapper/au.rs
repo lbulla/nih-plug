@@ -92,6 +92,12 @@ impl<P: AuPlugin> PluginInstance<P> {
             au_sys::kAudioUnitSetPropertySelect => {
                 Some(transmute(Self::set_property as *const c_void))
             }
+            au_sys::kAudioUnitGetParameterSelect => {
+                Some(transmute(Self::get_param as *const c_void))
+            }
+            au_sys::kAudioUnitSetParameterSelect => {
+                Some(transmute(Self::set_param as *const c_void))
+            }
             au_sys::kAudioUnitResetSelect => Some(transmute(Self::reset as *const c_void)),
             au_sys::kAudioUnitAddPropertyListenerSelect => {
                 Some(transmute(Self::add_property_listener as *const c_void))
@@ -105,6 +111,9 @@ impl<P: AuPlugin> PluginInstance<P> {
             }
             au_sys::kAudioUnitRemoveRenderNotifySelect => {
                 Some(transmute(Self::remove_render_notify as *const c_void))
+            }
+            au_sys::kAudioUnitScheduleParametersSelect => {
+                Some(transmute(Self::schedule_params as *const c_void))
             }
             au_sys::kAudioUnitRemovePropertyListenerWithUserDataSelect => Some(transmute(
                 Self::remove_property_listener_data as *const c_void,
@@ -160,6 +169,36 @@ impl<P: AuPlugin> PluginInstance<P> {
     ) -> au_sys::OSStatus {
         let wrapper = Self::wrapper_from_this(this);
         wrapper.set_property(in_id, in_scope, in_element, in_data, in_data_size)
+    }
+
+    unsafe extern "C" fn get_param(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        out_value: *mut au_sys::AudioUnitParameterValue,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.get_param(in_id, in_scope, in_element, out_value)
+    }
+
+    // NOTE: Potential realtime function. Hence, update the parameters immediately.
+    unsafe extern "C" fn set_param(
+        this: *mut c_void,
+        in_id: au_sys::AudioUnitPropertyID,
+        in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        in_value: au_sys::AudioUnitParameterValue,
+        in_buffer_offset_in_frames: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.set_param(
+            in_id,
+            in_scope,
+            in_element,
+            in_value,
+            in_buffer_offset_in_frames,
+        )
     }
 
     unsafe extern "C" fn reset(
@@ -224,6 +263,16 @@ impl<P: AuPlugin> PluginInstance<P> {
     ) -> au_sys::OSStatus {
         let wrapper = Self::wrapper_from_this(this);
         wrapper.remove_render_notify(in_proc, in_proc_data)
+    }
+
+    // NOTE: Potential realtime function. Called directly before `render`.
+    unsafe extern "C" fn schedule_params(
+        this: *mut c_void,
+        in_param_events: *const au_sys::AudioUnitParameterEvent,
+        in_num_param_events: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.schedule_params(in_param_events, in_num_param_events)
     }
 
     unsafe extern "C" fn remove_property_listener_data(
