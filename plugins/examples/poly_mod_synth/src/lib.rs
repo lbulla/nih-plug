@@ -526,7 +526,7 @@ impl PolyModSynth {
                     || (channel == *candidate_channel && note == *candidate_note) =>
                 {
                     *releasing = true;
-                    amp_envelope.style =
+                    *amp_envelope.style.as_ref().borrow_mut() =
                         SmoothingStyle::Exponential(self.params.amp_release_ms.value());
                     amp_envelope.set_target(sample_rate, 0.0);
 

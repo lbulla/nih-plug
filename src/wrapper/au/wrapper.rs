@@ -8,17 +8,20 @@ use objc2_app_kit::NSView;
 use objc2_foundation::NSThread;
 use parking_lot::{Mutex, RwLock};
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::hash_map::Keys;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
+use crate::params::ParamMut;
 use crate::prelude::{
-    AsyncExecutor, AuPlugin, AuxiliaryBuffers, BufferConfig, Editor, ParentWindowHandle,
-    ProcessMode, ProcessStatus, TaskExecutor, Transport,
+    AsyncExecutor, AuPlugin, AuxiliaryBuffers, BoolParam, BufferConfig, Editor, Param, ParamFlags,
+    ParamPtr, Params, ParentWindowHandle, ProcessMode, ProcessStatus, SmoothingStyle, TaskExecutor,
+    Transport,
 };
-use crate::wrapper::au::au_types::{AuPreset, AudioUnit};
+use crate::wrapper::au::au_types::{AuParamEvent, AuPreset, AudioUnit};
 use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use crate::wrapper::au::editor::WrapperViewHolder;
 use crate::wrapper::au::properties::{PropertyDispatcher, PropertyDispatcherImpl};
@@ -28,6 +31,7 @@ use crate::wrapper::au::scope::{
 use crate::wrapper::au::util::ThreadWrapper;
 use crate::wrapper::au::{au_sys, AuPropertyListenerProc, AuRenderCallback, NO_ERROR};
 use crate::wrapper::util::buffer_management::BufferManager;
+use crate::wrapper::util::hash_param_id;
 
 // ---------- Constants ---------- //
 
@@ -35,7 +39,7 @@ const DEFAULT_BUFFER_SIZE: u32 = 512;
 const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
 const DEFAULT_LAST_RENDER_SAMPLE_TIME: au_sys::Float64 = -1.0;
 
-// ---------- Types ---------- //
+// ---------- Listener / Notifies ---------- //
 
 struct PropertyListener {
     proc: AuPropertyListenerProc,
@@ -76,8 +80,157 @@ impl RenderNotifies {
 unsafe impl Send for RenderNotifies {}
 unsafe impl Sync for RenderNotifies {}
 
+// ---------- Params ---------- //
+
+pub(super) struct WrapperParam {
+    pub(super) id: String,
+    pub(super) ptr: ParamPtr,
+    pub(super) group_hash: u32,
+}
+
+// NOTE: `kAudioUnitProperty_BypassEffect` is a recommended property by `auval`.
+//       So we implement it even without a dedicated bypass parameter.
+enum BypassParam<'a> {
+    Default(AtomicBool),
+    Custom(&'a BoolParam),
+}
+
+const PARAM_EVENT_QUEUE_CAPACITY: usize = 2048;
+
+pub(super) enum EditorParamEvent {
+    BeginGesture {
+        param_hash: u32,
+    },
+    SetValueFromEditor {
+        param_hash: u32,
+        param: ParamPtr,
+        normalized_value: f32,
+    },
+    EndGesture {
+        param_hash: u32,
+    },
+    NotifyEditor {
+        param_hash: u32,
+        normalized_value: f32,
+    },
+}
+
+struct ScheduleParamImmediate {
+    param_hash: u32,
+    param: ParamPtr,
+    value: f32,
+}
+
+// NOTE: Great type name.
+type AuRamp = au_sys::AudioUnitParameterEvent__bindgen_ty_1__bindgen_ty_1;
+
+struct ScheduleParamRamp {
+    param_hash: u32,
+    param: ParamPtr,
+    duration: au_sys::UInt32,
+    start_value: f32,
+    end_value: f32,
+    backup_smoothing_style: SmoothingStyle,
+}
+
+// TODO: `SmoothingStyle` with samples rather than ms.
+// FIXME: Not very attractive to replace the smoother but I suppose it is still more efficient
+//        than processing 1 sample buffers.
+//        We could instead change the value only at the start and end of the ramp.
+//        However, this is then not sample accurate anymore. Or we could add a separate smoother.
+impl ScheduleParamRamp {
+    fn new(param_hash: u32, param: ParamPtr, ramp: &AuRamp) -> Self {
+        let duration = if ramp.startBufferOffset < 0 {
+            -ramp.startBufferOffset as au_sys::UInt32
+        } else {
+            ramp.durationInFrames
+        };
+
+        Self {
+            param_hash,
+            param,
+            duration,
+            start_value: ramp.startValue,
+            end_value: ramp.endValue,
+            backup_smoothing_style: SmoothingStyle::None,
+        }
+    }
+
+    fn init(&mut self, sample_rate: f32) -> f32 {
+        match self.param {
+            ParamPtr::EnumParam(param) => {
+                let param = unsafe { &*param };
+
+                let smoothed = &param.inner.smoothed;
+                self.backup_smoothing_style = smoothed.style.as_ref().borrow().clone();
+
+                *smoothed.style.as_ref().borrow_mut() =
+                    SmoothingStyle::Linear(self.duration as f32 * 1000.0 / sample_rate);
+                smoothed.reset(self.start_value as _);
+                smoothed.set_target(sample_rate, self.end_value as _);
+                param.preview_normalized(self.end_value as _)
+            }
+            ParamPtr::FloatParam(param) => {
+                let param = unsafe { &*param };
+
+                let smoothed = &param.smoothed;
+                self.backup_smoothing_style = smoothed.style.as_ref().borrow().clone();
+
+                *smoothed.style.as_ref().borrow_mut() =
+                    SmoothingStyle::Linear(self.duration as f32 * 1000.0 / sample_rate);
+                smoothed.reset(self.start_value);
+                smoothed.set_target(sample_rate, self.end_value);
+                self.end_value
+            }
+            ParamPtr::IntParam(param) => {
+                let param = unsafe { &*param };
+
+                let smoothed = &param.smoothed;
+                self.backup_smoothing_style = smoothed.style.as_ref().borrow().clone();
+
+                *smoothed.style.as_ref().borrow_mut() =
+                    SmoothingStyle::Linear(self.duration as f32 * 1000.0 / sample_rate);
+                smoothed.reset(self.start_value as _);
+                smoothed.set_target(sample_rate, self.end_value as _);
+                param.preview_normalized(self.end_value as _)
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Drop for ScheduleParamRamp {
+    fn drop(&mut self) {
+        match self.param {
+            ParamPtr::EnumParam(param) => {
+                let smoothed = unsafe { &(*param).inner.smoothed };
+                *smoothed.style.as_ref().borrow_mut() = self.backup_smoothing_style.clone();
+            }
+            ParamPtr::FloatParam(param) => {
+                let smoothed = unsafe { &(*param).smoothed };
+                *smoothed.style.as_ref().borrow_mut() = self.backup_smoothing_style.clone();
+            }
+            ParamPtr::IntParam(param) => {
+                let smoothed = unsafe { &(*param).smoothed };
+                *smoothed.style.as_ref().borrow_mut() = self.backup_smoothing_style.clone();
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+enum ScheduledParamEvent {
+    Immediate(ScheduleParamImmediate),
+    Ramp(ScheduleParamRamp),
+}
+
+// ---------- Task ---------- //
+
 pub(super) enum Task<P: AuPlugin> {
     PluginTask(P::BackgroundTask),
+
+    // NOTE: Notify the editor about parameter changes.
+    ParameterValueChanged(u32, f32),
 
     // NOTE: A `NSView` must be resized on the main thread.
     RequestResize,
@@ -90,6 +243,17 @@ pub(super) struct Wrapper<P: AuPlugin> {
 
     this: AtomicRefCell<Weak<Wrapper<P>>>,
     plugin: Mutex<P>,
+
+    params: Arc<dyn Params>,
+    param_hash_to_param: HashMap<u32, WrapperParam>,
+    param_ptr_to_hash: HashMap<ParamPtr, u32>,
+    group_hash_to_group: HashMap<u32, String>,
+    bypass_param: BypassParam<'static>,
+
+    editor_param_event_queue: ArrayQueue<EditorParamEvent>,
+    au_param_event: AtomicRefCell<AuParamEvent>,
+    // NOTE: Key: Buffer offset.
+    scheduled_params: AtomicRefCell<BTreeMap<au_sys::UInt32, Vec<ScheduledParamEvent>>>,
 
     property_listeners: AtomicRefCell<HashMap<au_sys::AudioUnitPropertyID, Vec<PropertyListener>>>,
     render_notifies: AtomicRefCell<RenderNotifies>,
@@ -121,8 +285,65 @@ impl<P: AuPlugin> Wrapper<P> {
     pub(super) fn new(unit: au_sys::AudioUnit) -> Arc<Self> {
         let mut plugin = P::default();
         let task_executor = plugin.task_executor();
-        let audio_io_layout = P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default();
 
+        let params = plugin.params();
+        let params_and_hashes: Vec<_> = params
+            .param_map()
+            .into_iter()
+            .map(|(id, ptr, group)| {
+                let param_hash = hash_param_id(&id);
+                let group_hash = hash_param_id(&group);
+                (id, param_hash, ptr, group, group_hash)
+            })
+            .collect();
+        let param_hash_to_param = params_and_hashes
+            .iter()
+            .map(|(id, param_hash, ptr, _, group_hash)| {
+                (
+                    *param_hash,
+                    WrapperParam {
+                        id: id.clone(),
+                        ptr: *ptr,
+                        group_hash: *group_hash,
+                    },
+                )
+            })
+            .collect();
+        let param_ptr_to_hash = params_and_hashes
+            .iter()
+            .map(|(_, param_hash, ptr, _, _)| (*ptr, *param_hash))
+            .collect();
+        let group_hash_to_group = params_and_hashes
+            .iter()
+            .map(|(_, _, _, group, group_hash)| (*group_hash, group.clone()))
+            .collect();
+        let bypass_param = params_and_hashes
+            .iter()
+            .find_map(|(_, _, ptr, _, _)| unsafe {
+                if ptr.flags().contains(ParamFlags::BYPASS) {
+                    Some(match ptr {
+                        ParamPtr::BoolParam(param) => BypassParam::Custom(&**param),
+                        _ => unreachable!(),
+                    })
+                } else {
+                    None
+                }
+            });
+        let bypass_param = bypass_param.unwrap_or(BypassParam::Default(AtomicBool::new(false)));
+
+        let au_param_event = AuParamEvent::new(au_sys::AudioUnitEvent {
+            mEventType: 0,
+            mArgument: au_sys::AudioUnitEvent__bindgen_ty_1 {
+                mParameter: au_sys::AudioUnitParameter {
+                    mAudioUnit: unit,
+                    mParameterID: 0,
+                    mScope: au_sys::kAudioUnitScope_Global,
+                    mElement: 0,
+                },
+            },
+        });
+
+        let audio_io_layout = P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default();
         let mut input_scope = IoScope::new();
         let mut output_scope = IoScope::new();
 
@@ -165,6 +386,16 @@ impl<P: AuPlugin> Wrapper<P> {
 
             this: AtomicRefCell::new(Weak::new()),
             plugin: Mutex::new(plugin),
+
+            params,
+            param_hash_to_param,
+            param_ptr_to_hash,
+            group_hash_to_group,
+            bypass_param,
+
+            editor_param_event_queue: ArrayQueue::new(PARAM_EVENT_QUEUE_CAPACITY),
+            au_param_event: AtomicRefCell::new(au_param_event),
+            scheduled_params: AtomicRefCell::new(BTreeMap::new()),
 
             property_listeners: AtomicRefCell::new(HashMap::new()),
             render_notifies: AtomicRefCell::new(RenderNotifies(Vec::new())),
@@ -384,9 +615,12 @@ impl<P: AuPlugin> Wrapper<P> {
                 if success {
                     plugin.reset();
 
-                    let params = plugin.params();
-                    for (_id, ptr, _group) in params.param_map().iter() {
-                        unsafe { ptr.update_smoother(buffer_config.sample_rate, true) };
+                    for (_, wrapper_param) in self.param_hash_to_param.iter() {
+                        unsafe {
+                            wrapper_param
+                                .ptr
+                                .update_smoother(buffer_config.sample_rate, true)
+                        };
                     }
 
                     *self.buffer_manager.borrow_mut() = BufferManager::for_audio_io_layout(
@@ -566,6 +800,283 @@ impl<P: AuPlugin> Wrapper<P> {
         }
     }
 
+    // ---------- Parameters ---------- //
+
+    pub(super) fn param_hashes(&self) -> Keys<u32, WrapperParam> {
+        self.param_hash_to_param.keys()
+    }
+
+    pub(super) fn param_hash_to_param(&self, hash: &u32) -> Option<&WrapperParam> {
+        self.param_hash_to_param.get(hash)
+    }
+
+    pub(super) fn param_ptr_to_hash(&self, ptr: &ParamPtr) -> Option<&u32> {
+        self.param_ptr_to_hash.get(ptr)
+    }
+
+    pub(super) fn group_hash_to_group(&self, hash: &u32) -> Option<&String> {
+        self.group_hash_to_group.get(hash)
+    }
+
+    pub(super) fn bypassed(&self) -> bool {
+        match &self.bypass_param {
+            BypassParam::Default(bypassed) => bypassed.load(Ordering::SeqCst),
+            BypassParam::Custom(param) => param.value(),
+        }
+    }
+
+    pub(super) fn set_bypassed(&self, bypass: bool) {
+        match &self.bypass_param {
+            BypassParam::Default(bypassed) => bypassed.store(bypass, Ordering::SeqCst),
+            BypassParam::Custom(param) => {
+                param.set_plain_value(bypass);
+            }
+        }
+    }
+
+    fn post_editor_param_event(&self, event: EditorParamEvent) {
+        let event_posted = self.editor_param_event_queue.push(event).is_ok();
+        nih_debug_assert!(
+            event_posted,
+            "Parameter event queue is full, parameter change will not be sent to the host"
+        );
+    }
+
+    fn handle_editor_param_event(&self, event: EditorParamEvent, au_event: &mut AuParamEvent) {
+        let success = match event {
+            EditorParamEvent::BeginGesture { param_hash } => {
+                au_event.send(
+                    au_sys::kAudioUnitEvent_BeginParameterChangeGesture,
+                    param_hash,
+                ) == NO_ERROR
+            }
+            EditorParamEvent::SetValueFromEditor {
+                param_hash,
+                param,
+                normalized_value,
+            } => {
+                let param_changed = self.set_param_impl(
+                    param_hash,
+                    param,
+                    normalized_value,
+                    true,
+                    self.sample_rate(),
+                    false,
+                );
+                if param_changed {
+                    let success = au_event
+                        .send(au_sys::kAudioUnitEvent_ParameterValueChange, param_hash)
+                        == NO_ERROR;
+                    unsafe {
+                        if success && param.flags().contains(ParamFlags::BYPASS) {
+                            self.call_property_listeners(
+                                au_sys::kAudioUnitProperty_BypassEffect,
+                                au_sys::kAudioUnitScope_Global,
+                                0,
+                            );
+                        }
+                    }
+                    success
+                } else {
+                    true
+                }
+            }
+            EditorParamEvent::EndGesture { param_hash } => {
+                au_event.send(
+                    au_sys::kAudioUnitEvent_EndParameterChangeGesture,
+                    param_hash,
+                ) == NO_ERROR
+            }
+            EditorParamEvent::NotifyEditor {
+                param_hash,
+                normalized_value,
+            } => self.schedule_gui(Task::ParameterValueChanged(param_hash, normalized_value)),
+        };
+        nih_debug_assert!(success, "Failed to handle `EditorParamEvent`");
+    }
+
+    pub(super) fn post_editor_param_event_gui(&self, event: EditorParamEvent) {
+        if self.is_rendering() {
+            self.post_editor_param_event(event);
+        } else {
+            let mut au_event = self.au_param_event.borrow_mut();
+            self.handle_editor_param_event(event, &mut au_event);
+        }
+    }
+
+    pub(super) fn get_param_impl(&self, param: ParamPtr) -> au_sys::AudioUnitParameterValue {
+        unsafe { param.unmodulated_normalized_value() * param.step_count().unwrap_or(1) as f32 }
+    }
+
+    pub(super) fn set_param_impl(
+        &self,
+        param_hash: u32,
+        param: ParamPtr,
+        value: f32,
+        value_is_normalized: bool,
+        sample_rate: f32,
+        notify_editor: bool,
+    ) -> bool {
+        let normalized_value;
+        unsafe {
+            if value_is_normalized {
+                if !param.set_normalized_value(value) {
+                    return false;
+                }
+                param.update_smoother(sample_rate, false);
+                normalized_value = value;
+            } else {
+                normalized_value = value / param.step_count().unwrap_or(1) as f32;
+                if !param.set_normalized_value(normalized_value) {
+                    return false;
+                }
+                param.update_smoother(sample_rate, false);
+            }
+        }
+
+        if notify_editor {
+            let task_posted =
+                self.schedule_gui(Task::ParameterValueChanged(param_hash, normalized_value));
+            nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
+        }
+        true
+    }
+
+    pub(super) fn get_param(
+        &self,
+        in_id: au_sys::AudioUnitParameterID,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_value: *mut au_sys::AudioUnitParameterValue,
+    ) -> au_sys::OSStatus {
+        if let Some(wrapper_param) = self.param_hash_to_param(&in_id) {
+            unsafe {
+                *out_value = self.get_param_impl(wrapper_param.ptr);
+            }
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidParameter
+        }
+    }
+
+    pub(super) fn set_param(
+        &self,
+        in_id: au_sys::AudioUnitParameterID,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        in_value: au_sys::AudioUnitParameterValue,
+        _in_buffer_offset_in_frames: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        if let Some(wrapper_param) = self.param_hash_to_param(&in_id) {
+            self.set_param_impl(
+                in_id,
+                wrapper_param.ptr,
+                in_value,
+                false,
+                self.sample_rate(),
+                true,
+            );
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidParameter
+        }
+    }
+
+    pub(super) unsafe fn schedule_params(
+        &self,
+        in_param_events: *const au_sys::AudioUnitParameterEvent,
+        in_num_param_events: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let buffer_config = self.buffer_config.borrow();
+
+        if P::SAMPLE_ACCURATE_AUTOMATION {
+            let mut scheduled_params = self.scheduled_params.borrow_mut();
+
+            for i in 0..in_num_param_events {
+                let event = &*in_param_events.add(i as _);
+
+                if let Some(wrapper_param) = self.param_hash_to_param(&event.parameter) {
+                    if event.eventType == au_sys::kParameterEvent_Immediate {
+                        let immediate = &event.eventValues.immediate;
+                        if immediate.bufferOffset >= buffer_config.max_buffer_size {
+                            return au_sys::kAudioUnitErr_TooManyFramesToProcess;
+                        } else if immediate.bufferOffset == 0 {
+                            self.set_param_impl(
+                                event.parameter,
+                                wrapper_param.ptr,
+                                immediate.value,
+                                false,
+                                buffer_config.sample_rate,
+                                true,
+                            );
+                        } else {
+                            scheduled_params
+                                .entry(immediate.bufferOffset)
+                                .or_default()
+                                .push(ScheduledParamEvent::Immediate(ScheduleParamImmediate {
+                                    param_hash: event.parameter,
+                                    param: wrapper_param.ptr,
+                                    value: immediate.value,
+                                }));
+                        }
+                    } else {
+                        // FIXME: This is untested because I cannot find any host which sends these
+                        //        kind of events. Logic Pro for instance, calls `set_param` and then
+                        //        `render` with adjusted buffer sizes. Anyway, `auval` seems to be
+                        //        happy with this implementation.
+                        match wrapper_param.ptr {
+                            ParamPtr::EnumParam(_)
+                            | ParamPtr::FloatParam(_)
+                            | ParamPtr::IntParam(_) => {
+                                // NOTE: Negative `startBufferOffset` => duration to use.
+                                //       `durationInFrames` stays the same for consecutive events
+                                //       since this is the total duration of the ramp.
+                                let ramp = &event.eventValues.ramp;
+                                if ramp.startBufferOffset.abs() as u32
+                                    >= buffer_config.max_buffer_size
+                                {
+                                    return au_sys::kAudioUnitErr_TooManyFramesToProcess;
+                                }
+
+                                scheduled_params
+                                    .entry(ramp.startBufferOffset.max(0) as _)
+                                    .or_default()
+                                    .push(ScheduledParamEvent::Ramp(ScheduleParamRamp::new(
+                                        event.parameter,
+                                        wrapper_param.ptr,
+                                        ramp,
+                                    )));
+                            }
+                            _ => return au_sys::kAudioUnitErr_InvalidParameter,
+                        }
+                    }
+                } else {
+                    return au_sys::kAudioUnitErr_InvalidParameter;
+                }
+            }
+        } else {
+            for i in 0..in_num_param_events {
+                let event = &*in_param_events.add(i as _);
+
+                if let Some(wrapper_param) = self.param_hash_to_param(&event.parameter) {
+                    let immediate = &event.eventValues.immediate;
+                    self.set_param_impl(
+                        event.parameter,
+                        wrapper_param.ptr,
+                        immediate.value,
+                        false,
+                        buffer_config.sample_rate,
+                        true,
+                    );
+                } else {
+                    return au_sys::kAudioUnitErr_InvalidParameter;
+                }
+            }
+        }
+
+        NO_ERROR
+    }
+
     // ---------- Render ---------- //
 
     pub(super) fn add_render_notify(
@@ -617,6 +1128,14 @@ impl<P: AuPlugin> Wrapper<P> {
 
     pub(super) fn last_render_sample_time(&self) -> au_sys::Float64 {
         self.last_render_sample_time.load(Ordering::SeqCst)
+    }
+
+    // FIXME: Find a better way to determine whether this plugin is currently rendering or not.
+    //        An initialized plugin might not be rendering anything.
+    //        Example: Bypass a plugin in Logic Pro. The `kAudioUnitProperty_BypassEffect`
+    //                 property seems to be unused in that host.
+    fn is_rendering(&self) -> bool {
+        self.last_render_sample_time() != DEFAULT_LAST_RENDER_SAMPLE_TIME
     }
 
     pub(super) fn reset(
@@ -676,55 +1195,129 @@ impl<P: AuPlugin> Wrapper<P> {
                     }
 
                     let mut buffer_manager = self.buffer_manager.borrow_mut();
-                    let buffers =
-                        buffer_manager.create_buffers(0, in_number_frames as _, |buffer_source| {
-                            for (i, input_element) in input_scope.elements.iter().enumerate() {
-                                let pointers = if i == 0 {
-                                    &mut buffer_source.main_input_channel_pointers
-                                } else {
-                                    &mut buffer_source.aux_input_channel_pointers[i - 1]
-                                };
-                                *pointers = input_element.create_channel_pointers();
-                            }
-
-                            for (i, output_element) in output_scope.elements.iter().enumerate() {
-                                let pointers = if i == 0 {
-                                    &mut buffer_source.main_output_channel_pointers
-                                } else {
-                                    &mut buffer_source.aux_output_channel_pointers[i - 1]
-                                };
-                                *pointers = output_element.create_channel_pointers();
-                            }
-                        });
 
                     let sample_rate = self.sample_rate();
-                    let mut aux = AuxiliaryBuffers {
-                        inputs: buffers.aux_inputs,
-                        outputs: buffers.aux_outputs,
-                    };
                     let transport = Transport::new(sample_rate);
                     let mut context = self.make_process_context(transport);
 
-                    let process_status =
-                        self.plugin
-                            .lock()
-                            .process(buffers.main_buffer, &mut aux, &mut context);
-                    match process_status {
-                        ProcessStatus::Error(err) => {
-                            nih_debug_assert_failure!("Process error: {}", err);
-                            // TODO: What OSStatus?
-                            self.tail_seconds.store(0.0);
+                    let mut process = |block_start: u32, block_length: u32| {
+                        let buffers = buffer_manager.create_buffers(
+                            block_start as _,
+                            block_length as _,
+                            |buffer_source| {
+                                for (i, input_element) in input_scope.elements.iter().enumerate() {
+                                    let pointers = if i == 0 {
+                                        &mut buffer_source.main_input_channel_pointers
+                                    } else {
+                                        &mut buffer_source.aux_input_channel_pointers[i - 1]
+                                    };
+                                    *pointers = input_element.create_channel_pointers();
+                                }
+
+                                for (i, output_element) in output_scope.elements.iter().enumerate()
+                                {
+                                    let pointers = if i == 0 {
+                                        &mut buffer_source.main_output_channel_pointers
+                                    } else {
+                                        &mut buffer_source.aux_output_channel_pointers[i - 1]
+                                    };
+                                    *pointers = output_element.create_channel_pointers();
+                                }
+                            },
+                        );
+
+                        let mut aux = AuxiliaryBuffers {
+                            inputs: buffers.aux_inputs,
+                            outputs: buffers.aux_outputs,
+                        };
+
+                        let process_status =
+                            self.plugin
+                                .lock()
+                                .process(buffers.main_buffer, &mut aux, &mut context);
+                        match process_status {
+                            ProcessStatus::Error(err) => {
+                                nih_debug_assert_failure!("Process error: {}", err);
+                                // TODO: What OSStatus?
+                                self.tail_seconds.store(0.0);
+                            }
+                            ProcessStatus::Normal => {
+                                self.tail_seconds.store(0.0);
+                            }
+                            ProcessStatus::Tail(tail) => {
+                                self.tail_seconds.store(
+                                    tail as au_sys::Float64 / sample_rate as au_sys::Float64,
+                                );
+                            }
+                            ProcessStatus::KeepAlive => {
+                                self.tail_seconds.store(au_sys::Float64::MAX);
+                            }
                         }
-                        ProcessStatus::Normal => {
-                            self.tail_seconds.store(0.0);
+                    };
+
+                    if P::SAMPLE_ACCURATE_AUTOMATION {
+                        let mut scheduled_params = self.scheduled_params.borrow_mut();
+
+                        let mut block_start = 0u32;
+                        for (block_end, param_events) in scheduled_params.iter_mut() {
+                            if *block_end >= in_number_frames {
+                                break;
+                            }
+
+                            let block_length = block_end - block_start;
+                            if block_length > 0 {
+                                process(block_start, block_length);
+                            }
+
+                            for param_event in param_events.iter_mut() {
+                                match param_event {
+                                    ScheduledParamEvent::Immediate(immediate) => {
+                                        let param_changed = self.set_param_impl(
+                                            immediate.param_hash,
+                                            immediate.param,
+                                            immediate.value,
+                                            false,
+                                            sample_rate,
+                                            false,
+                                        );
+                                        if param_changed {
+                                            self.post_editor_param_event(
+                                                EditorParamEvent::NotifyEditor {
+                                                    param_hash: immediate.param_hash,
+                                                    normalized_value: immediate
+                                                        .param
+                                                        .unmodulated_normalized_value(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    ScheduledParamEvent::Ramp(ramp) => {
+                                        let normalized_value = ramp.init(sample_rate);
+                                        self.post_editor_param_event(
+                                            EditorParamEvent::NotifyEditor {
+                                                param_hash: ramp.param_hash,
+                                                normalized_value,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+
+                            block_start = *block_end;
                         }
-                        ProcessStatus::Tail(tail) => {
-                            self.tail_seconds
-                                .store(tail as au_sys::Float64 / sample_rate as au_sys::Float64);
+
+                        if block_start < in_number_frames {
+                            process(block_start, in_number_frames - block_start);
                         }
-                        ProcessStatus::KeepAlive => {
-                            self.tail_seconds.store(au_sys::Float64::MAX);
-                        }
+
+                        scheduled_params.clear();
+                    } else {
+                        nih_debug_assert!(
+                            self.scheduled_params.borrow().is_empty(),
+                            "`scheduled_params` must only be used when sample accurate automation \
+                             is enabled"
+                        );
+                        process(0, in_number_frames);
                     }
                 }
 
@@ -753,6 +1346,15 @@ impl<P: AuPlugin> Wrapper<P> {
         io_data: *mut au_sys::AudioBufferList,
     ) -> au_sys::OSStatus {
         // ---------- Prepare ---------- //
+
+        match &self.bypass_param {
+            BypassParam::Default(bypassed) => {
+                if bypassed.load(Ordering::SeqCst) {
+                    return NO_ERROR;
+                }
+            }
+            _ => (),
+        }
 
         if in_time_stamp.is_null() || io_data.is_null() {
             let os_status = au_sys::kAudio_ParamError;
@@ -817,6 +1419,12 @@ impl<P: AuPlugin> Wrapper<P> {
         }
 
         self.set_last_render_error(os_status);
+
+        let mut au_param_event = self.au_param_event.borrow_mut();
+        while let Some(event) = self.editor_param_event_queue.pop() {
+            self.handle_editor_param_event(event, &mut au_param_event);
+        }
+
         os_status
     }
 }
@@ -865,6 +1473,16 @@ impl<P: AuPlugin> MainThreadExecutor<Task<P>> for Wrapper<P> {
     fn execute(&self, task: Task<P>, is_gui_thread: bool) {
         match task {
             Task::PluginTask(task) => (self.task_executor.lock())(task),
+            Task::ParameterValueChanged(param_hash, normalized_value) => {
+                if let Some(editor) = self.editor.borrow().as_ref() {
+                    if self.wrapper_view_holder.borrow().has_view() {
+                        let param_id = &self.param_hash_to_param[&param_hash].id;
+                        editor
+                            .lock()
+                            .param_value_changed(param_id, normalized_value);
+                    }
+                }
+            }
             Task::RequestResize => {
                 nih_debug_assert!(
                     is_gui_thread,

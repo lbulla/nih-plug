@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use nih_plug_derive::PropertyDispatcherImpl;
 
-use crate::prelude::AuPlugin;
+use crate::prelude::{AuPlugin, Param, ParamFlags, ParamPtr};
 use crate::wrapper::au::editor::WrapperViewCreator;
 use crate::wrapper::au::scope::ShouldAllocate;
-use crate::wrapper::au::util::utf8_to_CFStringRef;
+use crate::wrapper::au::util::{
+    str_to_CFStringRef, utf8_to_CFStringRef, value_strings_for_param, CFStringRef_to_string,
+};
 use crate::wrapper::au::{au_sys, Wrapper, NO_ERROR};
 
 // ---------- Constants ---------- //
@@ -42,11 +44,14 @@ pub(super) enum PropertyDispatcher {
     ClassInfoProperty,
     MakeConnectionProperty,
     SampleRateProperty,
+    ParameterListProperty,
+    ParameterInfoProperty,
     StreamFormatProperty,
     ElementCountProperty,
     LatencyProperty,
     SupportedNumChannelsProperty,
     MaximumFramesPerSliceProperty,
+    ParameterValueStrings,
     AudioChannelLayoutProperty,
     TailTimeProperty,
     BypassEffectProperty,
@@ -55,7 +60,10 @@ pub(super) enum PropertyDispatcher {
     ElementNameProperty,
     CocoaUIProperty,
     SupportedChannelLayoutTagsProperty,
+    ParameterStringFromValueProperty,
+    ParameterClumpNameProperty,
     PresentPresetProperty,
+    ParameterValueFromStringProperty,
     ShouldAllocateBufferProperty,
     LastRenderSampleTimeProperty,
 
@@ -642,6 +650,147 @@ declare_property!(
 );
 
 declare_property!(
+    pub(super) struct ParameterListProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ParameterList;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AudioUnitParameterID;
+
+    fn size(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        (size_of::<Self::Type>() * wrapper.param_hashes().len()) as _
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        let out_data = &raw mut *out_data;
+        for (i, hash) in wrapper.param_hashes().enumerate() {
+            unsafe { *out_data.add(i) = *hash };
+        }
+        NO_ERROR
+    }
+);
+
+// FIXME: `auval` warns about small rounding errors for float parameters
+//        (Parameter did not retain default value when set).
+//        I suppose that is due to the normalized representation and the 32 bit float type.
+//        Example: `crossover` plugin => Parameter `Crossover 3`.
+declare_property!(
+    pub(super) struct ParameterInfoProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ParameterInfo;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AudioUnitParameterInfo;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        if let Some(wrapper_param) = wrapper.param_hash_to_param(&in_element) {
+            out_data.name.fill(0); // NOTE: Unused (legacy).
+
+            out_data.unitName = null();
+            out_data.clumpID = wrapper_param.group_hash;
+            out_data.minValue = 0.0;
+            out_data.flags = au_sys::kAudioUnitParameterFlag_HasCFNameString
+                | au_sys::kAudioUnitParameterFlag_CFNameRelease
+                | au_sys::kAudioUnitParameterFlag_IsHighResolution
+                | au_sys::kAudioUnitParameterFlag_IsReadable;
+            if out_data.clumpID != au_sys::kAudioUnitClumpID_System {
+                out_data.flags |= au_sys::kAudioUnitParameterFlag_HasClump;
+            }
+
+            // NOTE: Skip some matches this way.
+            let flags;
+            match wrapper_param.ptr {
+                ParamPtr::BoolParam(param) => {
+                    let param = unsafe { &*param };
+                    flags = param.flags();
+
+                    out_data.cfNameString = str_to_CFStringRef(param.name());
+                    out_data.unit = au_sys::kAudioUnitParameterUnit_Boolean;
+                    out_data.minValue = 0.0;
+                    out_data.maxValue = 1.0;
+                    out_data.defaultValue = param.default_normalized_value();
+                    out_data.flags |= au_sys::kAudioUnitParameterFlag_ValuesHaveStrings;
+                }
+                ParamPtr::EnumParam(param) => {
+                    let param = unsafe { &*param };
+                    flags = param.flags();
+
+                    out_data.cfNameString = str_to_CFStringRef(param.name());
+                    out_data.unit = au_sys::kAudioUnitParameterUnit_Indexed;
+                    out_data.maxValue = param.step_count().unwrap_or(1) as _;
+                    out_data.defaultValue = param.default_normalized_value() * out_data.maxValue;
+                    out_data.flags |= au_sys::kAudioUnitParameterFlag_ValuesHaveStrings;
+
+                    if P::SAMPLE_ACCURATE_AUTOMATION {
+                        out_data.flags |= au_sys::kAudioUnitParameterFlag_CanRamp;
+                    }
+                }
+                ParamPtr::FloatParam(param) => {
+                    let param = unsafe { &*param };
+                    flags = param.flags();
+
+                    out_data.cfNameString = str_to_CFStringRef(param.name());
+                    out_data.unit = au_sys::kAudioUnitParameterUnit_Generic;
+                    out_data.maxValue = param.step_count().unwrap_or(1) as _;
+                    out_data.defaultValue = param.default_normalized_value() * out_data.maxValue;
+
+                    if P::SAMPLE_ACCURATE_AUTOMATION {
+                        out_data.flags |= au_sys::kAudioUnitParameterFlag_CanRamp;
+                    }
+                }
+                ParamPtr::IntParam(param) => {
+                    let param = unsafe { &*param };
+                    flags = param.flags();
+
+                    out_data.cfNameString = str_to_CFStringRef(param.name());
+                    out_data.unit = au_sys::kAudioUnitParameterUnit_Indexed;
+                    out_data.maxValue = param.step_count().unwrap_or(1) as _;
+                    out_data.defaultValue = param.default_normalized_value() * out_data.maxValue;
+                    out_data.flags |= au_sys::kAudioUnitParameterFlag_ValuesHaveStrings;
+
+                    if P::SAMPLE_ACCURATE_AUTOMATION {
+                        out_data.flags |= au_sys::kAudioUnitParameterFlag_CanRamp;
+                    }
+                }
+            }
+
+            let non_automatable = flags.contains(ParamFlags::NON_AUTOMATABLE);
+            let hidden = flags.contains(ParamFlags::HIDDEN);
+            if non_automatable || hidden {
+                out_data.flags |= au_sys::kAudioUnitParameterFlag_NonRealTime
+            }
+            if !hidden {
+                out_data.flags |= au_sys::kAudioUnitParameterFlag_IsWritable;
+            }
+
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidParameter
+        }
+    }
+);
+
+declare_property!(
     pub(super) struct StreamFormatProperty;
 
     const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_StreamFormat;
@@ -871,6 +1020,52 @@ declare_property!(
     }
 );
 
+declare_property!(
+    pub(super) struct ParameterValueStrings;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ParameterValueStrings;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::CFArrayRef;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        if let Some(wrapper_param) = wrapper.param_hash_to_param(&in_element) {
+            match wrapper_param.ptr {
+                ParamPtr::BoolParam(param) => {
+                    let param = unsafe { &*param };
+                    *out_data = value_strings_for_param(param);
+                    NO_ERROR
+                }
+                ParamPtr::EnumParam(param) => {
+                    let param = unsafe { &*param };
+                    *out_data = value_strings_for_param(param);
+                    NO_ERROR
+                }
+                ParamPtr::FloatParam(_) => au_sys::kAudioUnitErr_PropertyNotInUse,
+                ParamPtr::IntParam(param) => {
+                    let param = unsafe { &*param };
+                    *out_data = value_strings_for_param(param);
+                    NO_ERROR
+                }
+            }
+        } else {
+            au_sys::kAudioUnitErr_InvalidParameter
+        }
+    }
+);
+
 // TODO: Support more than just `mChannelLayoutTag`.
 declare_property!(
     pub(super) struct AudioChannelLayoutProperty;
@@ -968,24 +1163,23 @@ declare_property!(
     }
 
     fn get_impl(
-        _wrapper: &Wrapper<P>,
+        wrapper: &Wrapper<P>,
         _in_scope: au_sys::AudioUnitScope,
         _in_element: au_sys::AudioUnitElement,
         out_data: &mut Type,
     ) -> au_sys::OSStatus {
-        // TODO
-        *out_data = false as _;
+        *out_data = wrapper.bypassed() as _;
         NO_ERROR
     }
 
     fn set_impl(
-        _wrapper: &mut Wrapper<P>,
+        wrapper: &mut Wrapper<P>,
         _in_scope: au_sys::AudioUnitScope,
         _in_element: au_sys::AudioUnitElement,
-        _in_data: &Type,
+        in_data: &Type,
     ) -> au_sys::OSStatus {
-        // TODO
-        au_sys::kAudioUnitErr_PropertyNotWritable
+        wrapper.set_bypassed(*in_data > 0);
+        NO_ERROR
     }
 
     fn reset_impl(
@@ -1160,6 +1354,78 @@ declare_property!(
 );
 
 declare_property!(
+    pub(super) struct ParameterStringFromValueProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ParameterStringFromValue;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AudioUnitParameterStringFromValue;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        if let Some(wrapper_param) = wrapper.param_hash_to_param(&out_data.inParamID) {
+            unsafe {
+                out_data.outString = str_to_CFStringRef(
+                    wrapper_param
+                        .ptr
+                        .normalized_value_to_string(
+                            *out_data.inValue / wrapper_param.ptr.step_count().unwrap_or(1) as f32,
+                            true,
+                        )
+                        .as_str(),
+                );
+            }
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidParameter
+        }
+    }
+);
+
+declare_property!(
+    pub(super) struct ParameterClumpNameProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ParameterClumpName;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AudioUnitParameterIDName;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        if let Some(group) = wrapper.group_hash_to_group(&out_data.inID) {
+            let mut group = group.clone();
+            group.truncate(out_data.inDesiredLength as _);
+            out_data.outName = str_to_CFStringRef(group.as_str());
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidPropertyValue
+        }
+    }
+);
+
+declare_property!(
     pub(super) struct PresentPresetProperty;
 
     const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_PresentPreset;
@@ -1205,6 +1471,45 @@ declare_property!(
         _in_element: au_sys::AudioUnitElement,
     ) -> au_sys::OSStatus {
         au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
+declare_property!(
+    pub(super) struct ParameterValueFromStringProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_ParameterValueFromString;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AudioUnitParameterValueFromString;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn get_impl(
+        wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        if let Some(wrapper_param) = wrapper.param_hash_to_param(&out_data.inParamID) {
+            unsafe {
+                if let Some(value) = wrapper_param
+                    .ptr
+                    .string_to_normalized_value(CFStringRef_to_string(out_data.inString).as_str())
+                {
+                    out_data.outValue = value * wrapper_param.ptr.step_count().unwrap_or(1) as f32;
+                } else {
+                    return au_sys::kAudioUnitErr_InvalidParameterValue;
+                }
+            }
+            NO_ERROR
+        } else {
+            au_sys::kAudioUnitErr_InvalidParameter
+        }
     }
 );
 

@@ -1,6 +1,6 @@
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::num::NonZeroU32;
-use std::ptr::copy_nonoverlapping;
+use std::ptr::{copy_nonoverlapping, null_mut};
 
 use crate::wrapper::au::au_sys;
 use crate::wrapper::au::util::{release_CFStringRef, utf8_to_CFStringRef, ThreadWrapper};
@@ -259,3 +259,28 @@ impl<'a> Iterator for AuBufferListIterMut<'a> {
         }
     }
 }
+
+// ---------- AuParamEvent ---------- //
+
+pub(super) struct AuParamEvent(au_sys::AudioUnitEvent);
+
+impl AuParamEvent {
+    pub(super) fn new(event: au_sys::AudioUnitEvent) -> Self {
+        Self(event)
+    }
+
+    pub(super) fn send(
+        &mut self,
+        event_type: au_sys::AudioUnitEventType,
+        param_id: au_sys::AudioUnitParameterID,
+    ) -> au_sys::OSStatus {
+        self.0.mEventType = event_type;
+        unsafe {
+            self.0.mArgument.mParameter.mParameterID = param_id;
+            au_sys::AUEventListenerNotify(null_mut(), null_mut(), &raw const self.0)
+        }
+    }
+}
+
+unsafe impl Send for AuParamEvent {}
+unsafe impl Sync for AuParamEvent {}
