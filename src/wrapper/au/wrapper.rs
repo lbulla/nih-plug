@@ -644,6 +644,23 @@ impl<P: AuPlugin> Wrapper<P> {
                         output_element.resize_buffer(buffer_config.max_buffer_size);
                     }
 
+                    if let Some(main_sample_rate) = output_scope
+                        .elements
+                        .get(0)
+                        .map(|output_element| output_element.stream_format().mSampleRate)
+                    {
+                        for input_element in input_scope.elements.iter() {
+                            if !input_element.init_converter(main_sample_rate, false) {
+                                return au_sys::kAudioUnitErr_FailedInitialization;
+                            }
+                        }
+                        for output_element in output_scope.elements.iter().skip(1) {
+                            if !output_element.init_converter(main_sample_rate, true) {
+                                return au_sys::kAudioUnitErr_FailedInitialization;
+                            }
+                        }
+                    }
+
                     self.initialized.store(true, Ordering::SeqCst);
                     return NO_ERROR;
                 } else {
@@ -1335,8 +1352,10 @@ impl<P: AuPlugin> Wrapper<P> {
             }
 
             if (*io_data).mBuffers[0].mData.is_null() {
+                current_output_element.convert_buffer();
                 current_output_element.copy_buffer_list_to(io_data);
             } else {
+                current_output_element.convert_buffer();
                 current_output_element.copy_buffer_to(io_data);
             }
 
