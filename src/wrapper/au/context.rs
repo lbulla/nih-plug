@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::event_loop::EventLoop;
@@ -67,14 +66,12 @@ impl<P: AuPlugin> GuiContext for WrapperGuiContext<P> {
     }
 
     fn get_state(&self) -> PluginState {
-        PluginState {
-            version: String::new(),
-            params: BTreeMap::new(),
-            fields: BTreeMap::new(),
-        }
+        self.wrapper.get_state_object()
     }
 
-    fn set_state(&self, _state: PluginState) {}
+    fn set_state(&self, state: PluginState) {
+        self.wrapper.set_state_object_from_gui(state);
+    }
 }
 
 // ---------- WrapperInitContext ---------- //
