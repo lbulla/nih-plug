@@ -1,6 +1,8 @@
 use atomic_float::AtomicF64;
 use atomic_refcell::AtomicRefCell;
 use crossbeam::atomic::AtomicCell;
+use crossbeam::channel;
+use crossbeam::channel::{Receiver, SendTimeoutError, Sender};
 use crossbeam::queue::ArrayQueue;
 use dispatch::Queue;
 use objc2::rc::Retained;
@@ -13,13 +15,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
 use crate::params::ParamMut;
 use crate::prelude::{
-    AsyncExecutor, AuPlugin, AuxiliaryBuffers, BoolParam, BufferConfig, Editor, Param, ParamFlags,
-    ParamPtr, Params, ParentWindowHandle, ProcessMode, ProcessStatus, SmoothingStyle, TaskExecutor,
-    Transport,
+    AsyncExecutor, AuPlugin, AudioIOLayout, AuxiliaryBuffers, BoolParam, BufferConfig, Editor,
+    Param, ParamFlags, ParamPtr, Params, ParentWindowHandle, PluginState, ProcessMode,
+    ProcessStatus, SmoothingStyle, TaskExecutor, Transport,
 };
 use crate::wrapper::au::au_types::{AuParamEvent, AuPreset, AudioUnit};
 use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
@@ -30,6 +33,7 @@ use crate::wrapper::au::scope::{
 };
 use crate::wrapper::au::util::ThreadWrapper;
 use crate::wrapper::au::{au_sys, AuPropertyListenerProc, AuRenderCallback, NO_ERROR};
+use crate::wrapper::state;
 use crate::wrapper::util::buffer_management::BufferManager;
 use crate::wrapper::util::hash_param_id;
 
@@ -231,6 +235,7 @@ pub(super) enum Task<P: AuPlugin> {
 
     // NOTE: Notify the editor about parameter changes.
     ParameterValueChanged(u32, f32),
+    ParameterValuesChanged,
 
     // NOTE: A `NSView` must be resized on the main thread.
     RequestResize,
@@ -247,6 +252,7 @@ pub(super) struct Wrapper<P: AuPlugin> {
     params: Arc<dyn Params>,
     param_hash_to_param: HashMap<u32, WrapperParam>,
     param_ptr_to_hash: HashMap<ParamPtr, u32>,
+    param_id_to_ptr: HashMap<String, ParamPtr>,
     group_hash_to_group: HashMap<u32, String>,
     bypass_param: BypassParam<'static>,
 
@@ -265,6 +271,7 @@ pub(super) struct Wrapper<P: AuPlugin> {
     editor: AtomicRefCell<Option<Mutex<Box<dyn Editor>>>>,
     wrapper_view_holder: AtomicRefCell<WrapperViewHolder>,
 
+    audio_io_layout: AtomicRefCell<AudioIOLayout>,
     buffer_config: AtomicRefCell<BufferConfig>,
     buffer_manager: AtomicRefCell<BufferManager>,
     latency_samples: AtomicU32,
@@ -276,9 +283,11 @@ pub(super) struct Wrapper<P: AuPlugin> {
     tail_seconds: AtomicCell<au_sys::Float64>,
     last_render_error: AtomicCell<au_sys::OSStatus>,
     last_render_sample_time: AtomicF64,
-
     initialized: AtomicBool,
-    preset: AuPreset, // TODO
+
+    updated_state_sender: Sender<PluginState>,
+    updated_state_receiver: Receiver<PluginState>,
+    preset: AuPreset,
 }
 
 impl<P: AuPlugin> Wrapper<P> {
@@ -312,6 +321,10 @@ impl<P: AuPlugin> Wrapper<P> {
         let param_ptr_to_hash = params_and_hashes
             .iter()
             .map(|(_, param_hash, ptr, _, _)| (*ptr, *param_hash))
+            .collect();
+        let param_id_to_ptr = params_and_hashes
+            .iter()
+            .map(|(id, _, ptr, _, _)| (id.clone(), *ptr))
             .collect();
         let group_hash_to_group = params_and_hashes
             .iter()
@@ -381,6 +394,8 @@ impl<P: AuPlugin> Wrapper<P> {
             element.set_should_allocate(ShouldAllocate::Force);
         }
 
+        let (updated_state_sender, updated_state_receiver) = channel::bounded(0);
+
         let wrapper = Arc::new(Self {
             unit: AudioUnit::new(unit),
 
@@ -390,6 +405,7 @@ impl<P: AuPlugin> Wrapper<P> {
             params,
             param_hash_to_param,
             param_ptr_to_hash,
+            param_id_to_ptr,
             group_hash_to_group,
             bypass_param,
 
@@ -407,6 +423,7 @@ impl<P: AuPlugin> Wrapper<P> {
             editor: AtomicRefCell::new(None),
             wrapper_view_holder: AtomicRefCell::new(WrapperViewHolder::default()),
 
+            audio_io_layout: AtomicRefCell::new(audio_io_layout),
             buffer_config: AtomicRefCell::new(BufferConfig {
                 sample_rate: DEFAULT_SAMPLE_RATE,
                 min_buffer_size: None,
@@ -425,8 +442,10 @@ impl<P: AuPlugin> Wrapper<P> {
             tail_seconds: AtomicCell::new(0.0),
             last_render_error: AtomicCell::new(NO_ERROR),
             last_render_sample_time: AtomicF64::new(DEFAULT_LAST_RENDER_SAMPLE_TIME),
-
             initialized: AtomicBool::new(false),
+
+            updated_state_sender,
+            updated_state_receiver,
             preset: AuPreset::default(),
         });
 
@@ -473,17 +492,6 @@ impl<P: AuPlugin> Wrapper<P> {
 
     pub(super) fn initialized(&self) -> bool {
         self.initialized.load(Ordering::SeqCst)
-    }
-
-    // ---------- Presets ---------- //
-
-    // TODO
-    pub(super) fn preset(&self) -> &au_sys::AUPreset {
-        self.preset.as_ref()
-    }
-
-    pub(super) fn set_preset(&mut self, preset: au_sys::AUPreset) {
-        self.preset.set(preset);
     }
 
     // ---------- Contexts ---------- //
@@ -607,6 +615,7 @@ impl<P: AuPlugin> Wrapper<P> {
                 let mut plugin = self.plugin.lock();
 
                 let audio_io_layout = P::AUDIO_IO_LAYOUTS[i];
+                *self.audio_io_layout.borrow_mut() = audio_io_layout;
                 let buffer_config = self.buffer_config.borrow();
                 let mut init_context = self.make_init_context();
 
@@ -1425,7 +1434,127 @@ impl<P: AuPlugin> Wrapper<P> {
             self.handle_editor_param_event(event, &mut au_param_event);
         }
 
+        let updated_state = self.updated_state_receiver.try_recv();
+        if let Ok(mut state) = updated_state {
+            self.set_state_object(&mut state, true);
+
+            if let Err(err) = self.updated_state_sender.send(state) {
+                nih_debug_assert_failure!(
+                    "Failed to send state object back to GUI thread: {}",
+                    err
+                );
+            };
+        }
+
         os_status
+    }
+
+    // ---------- State ---------- //
+
+    pub(super) unsafe fn get_desc(&self) -> (au_sys::AudioComponentDescription, au_sys::OSStatus) {
+        let comp = au_sys::AudioComponentInstanceGetComponent(self.unit());
+        let mut desc = au_sys::AudioComponentDescription::default();
+        let os_status = au_sys::AudioComponentGetDescription(comp, &raw mut desc);
+        (desc, os_status)
+    }
+
+    fn make_params_iter(&self) -> impl IntoIterator<Item = (&String, ParamPtr)> {
+        self.param_hash_to_param
+            .iter()
+            .filter_map(|(_, wrapper_param)| Some((&wrapper_param.id, wrapper_param.ptr)))
+    }
+
+    pub(super) fn get_state_json(&self) -> Vec<u8> {
+        unsafe { state::serialize_json::<P>(self.params.clone(), self.make_params_iter()).unwrap() }
+    }
+
+    pub(super) fn set_state_json(&self, state: &[u8]) -> bool {
+        if let Some(mut state) = unsafe { state::deserialize_json(state) } {
+            self.set_state_object(&mut state, false)
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn get_state_object(&self) -> PluginState {
+        unsafe { state::serialize_object::<P>(self.params.clone(), self.make_params_iter()) }
+    }
+
+    fn set_state_object(&self, state: &mut PluginState, from_gui: bool) -> bool {
+        let mut success = unsafe {
+            state::deserialize_object::<P>(
+                state,
+                self.params.clone(),
+                |param_id| self.param_id_to_ptr.get(param_id).copied(),
+                Some(&self.buffer_config.borrow()),
+            )
+        };
+        if !success {
+            return false;
+        }
+
+        let mut plugin = self.plugin.lock();
+
+        let audio_io_layout = self.audio_io_layout.borrow();
+        let buffer_config = self.buffer_config.borrow();
+        let mut init_context = self.make_init_context();
+
+        success = plugin.initialize(&audio_io_layout, &buffer_config, &mut init_context);
+        if success {
+            plugin.reset();
+        } else {
+            return false;
+        }
+
+        let task_posted = self.schedule_gui(Task::ParameterValuesChanged);
+        nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
+
+        self.request_resize();
+        if from_gui {
+            self.call_property_listeners(
+                au_sys::kAudioUnitProperty_ClassInfo,
+                au_sys::kAudioUnitScope_Global,
+                0,
+            );
+        }
+
+        true
+    }
+
+    pub(super) fn set_state_object_from_gui(&self, mut state: PluginState) {
+        loop {
+            if self.is_rendering() {
+                match self
+                    .updated_state_sender
+                    .send_timeout(state, Duration::from_secs(1))
+                {
+                    Ok(_) => {
+                        let state = self.updated_state_receiver.recv();
+                        drop(state);
+                        break;
+                    }
+                    Err(SendTimeoutError::Timeout(value)) => {
+                        state = value;
+                        continue;
+                    }
+                    Err(SendTimeoutError::Disconnected(_)) => {
+                        nih_debug_assert_failure!("State update channel got disconnected");
+                        return;
+                    }
+                }
+            } else {
+                self.set_state_object(&mut state, true);
+                break;
+            }
+        }
+    }
+
+    pub(super) fn preset(&self) -> &au_sys::AUPreset {
+        self.preset.as_ref()
+    }
+
+    pub(super) fn set_preset(&mut self, preset: Option<au_sys::AUPreset>) {
+        self.preset.set(preset);
     }
 }
 
@@ -1480,6 +1609,13 @@ impl<P: AuPlugin> MainThreadExecutor<Task<P>> for Wrapper<P> {
                         editor
                             .lock()
                             .param_value_changed(param_id, normalized_value);
+                    }
+                }
+            }
+            Task::ParameterValuesChanged => {
+                if let Some(editor) = self.editor.borrow().as_ref() {
+                    if self.wrapper_view_holder.borrow().has_view() {
+                        editor.lock().param_values_changed();
                     }
                 }
             }

@@ -1,6 +1,6 @@
 use std::ffi::c_void;
-use std::ptr::{copy_nonoverlapping, null};
-use std::sync::Arc;
+use std::ptr::{copy_nonoverlapping, null, slice_from_raw_parts};
+use std::sync::{Arc, LazyLock};
 
 use nih_plug_derive::PropertyDispatcherImpl;
 
@@ -8,7 +8,8 @@ use crate::prelude::{AuPlugin, Param, ParamFlags, ParamPtr};
 use crate::wrapper::au::editor::WrapperViewCreator;
 use crate::wrapper::au::scope::ShouldAllocate;
 use crate::wrapper::au::util::{
-    str_to_CFStringRef, utf8_to_CFStringRef, value_strings_for_param, CFStringRef_to_string,
+    retain_CFStringRef, str_to_CFStringRef, utf8_to_const_CFStringRef, value_strings_for_param,
+    CFStringRef_to_string,
 };
 use crate::wrapper::au::{au_sys, Wrapper, NO_ERROR};
 
@@ -33,6 +34,31 @@ const IO_SCOPE: &'static [au_sys::AudioUnitScope] = &[
 // NOTE: 0 -> 63999 is reserved (see `AudioUnitProperties.h`).
 //       But we use a less obvious value than 64000.
 const WRAPPER_PROPERTY_ID: au_sys::AudioUnitPropertyID = 0x787725F1;
+
+// ---------- Preset ---------- //
+
+const AU_PRESET_VERSION: au_sys::SInt32 = 0;
+
+struct ClassInfoKeys {
+    version: *const c_void,
+    type_: *const c_void,
+    subtype: *const c_void,
+    manufacturer: *const c_void,
+    data: *const c_void,
+    name: *const c_void,
+}
+
+unsafe impl Send for ClassInfoKeys {}
+unsafe impl Sync for ClassInfoKeys {}
+
+static KEYS: LazyLock<ClassInfoKeys> = LazyLock::new(|| ClassInfoKeys {
+    version: utf8_to_const_CFStringRef(au_sys::kAUPresetVersionKey) as _,
+    type_: utf8_to_const_CFStringRef(au_sys::kAUPresetTypeKey) as _,
+    subtype: utf8_to_const_CFStringRef(au_sys::kAUPresetSubtypeKey) as _,
+    manufacturer: utf8_to_const_CFStringRef(au_sys::kAUPresetManufacturerKey) as _,
+    data: utf8_to_const_CFStringRef(au_sys::kAUPresetDataKey) as _,
+    name: utf8_to_const_CFStringRef(au_sys::kAUPresetNameKey) as _,
+});
 
 // ---------- PropertyDispatcher ---------- //
 
@@ -484,57 +510,132 @@ declare_property!(
         _in_element: au_sys::AudioUnitElement,
         out_data: &mut Type,
     ) -> au_sys::OSStatus {
-        // TODO
         unsafe {
-            let comp = au_sys::AudioComponentInstanceGetComponent(wrapper.unit());
-            let mut desc = au_sys::AudioComponentDescription::default();
-            let os_status = au_sys::AudioComponentGetDescription(comp, &raw mut desc);
+            let (desc, os_status) = wrapper.get_desc();
             if os_status != NO_ERROR {
                 return os_status;
             }
 
             let dict = au_sys::CFDictionaryCreateMutable(
                 au_sys::kCFAllocatorDefault,
-                5,
+                6,
                 &raw const au_sys::kCFTypeDictionaryKeyCallBacks,
                 &raw const au_sys::kCFTypeDictionaryValueCallBacks,
             );
 
-            let add_num = |key: &[u8], num: au_sys::SInt32| {
-                let key = utf8_to_CFStringRef(key);
+            let set_num = |key: *const c_void, num: au_sys::SInt32| {
                 let value = au_sys::CFNumberCreate(
                     au_sys::kCFAllocatorDefault,
                     au_sys::kCFNumberSInt32Type as _,
                     &raw const num as _,
                 );
-                au_sys::CFDictionarySetValue(dict, key as _, value as _);
+                au_sys::CFDictionarySetValue(dict, key, value as _);
             };
 
-            add_num(au_sys::kAUPresetVersionKey, 0);
-            add_num(au_sys::kAUPresetTypeKey, desc.componentType as _);
-            add_num(au_sys::kAUPresetSubtypeKey, desc.componentSubType as _);
-            add_num(
-                au_sys::kAUPresetManufacturerKey,
-                desc.componentManufacturer as _,
-            );
+            set_num(KEYS.version, AU_PRESET_VERSION);
+            set_num(KEYS.type_, desc.componentType as _);
+            set_num(KEYS.subtype, desc.componentSubType as _);
+            set_num(KEYS.manufacturer, desc.componentManufacturer as _);
 
-            let name_key = utf8_to_CFStringRef(au_sys::kAUPresetNameKey);
+            let data = wrapper.get_state_json();
+            let data_value =
+                au_sys::CFDataCreate(au_sys::kCFAllocatorDefault, data.as_ptr(), data.len() as _);
+            au_sys::CFDictionarySetValue(dict, KEYS.data, data_value as _);
+
             let name_value = wrapper.preset().presetName;
-            au_sys::CFDictionarySetValue(dict, name_key as _, name_value as _);
+            au_sys::CFDictionarySetValue(dict, KEYS.name, name_value as _);
 
             *out_data = dict;
+            os_status
         }
-        NO_ERROR
     }
 
     fn set_impl(
-        _wrapper: &mut Wrapper<P>,
+        wrapper: &mut Wrapper<P>,
         _in_scope: au_sys::AudioUnitScope,
         _in_element: au_sys::AudioUnitElement,
-        _in_data: &Type,
+        in_data: &Type,
     ) -> au_sys::OSStatus {
-        // TODO
-        au_sys::kAudioUnitErr_PropertyNotWritable
+        unsafe {
+            let (desc, mut os_status) = wrapper.get_desc();
+            if os_status != NO_ERROR {
+                return os_status;
+            }
+
+            let dict = *in_data;
+
+            let check_num = |key: *const c_void, target: au_sys::SInt32| {
+                let value = au_sys::CFDictionaryGetValue(dict, key);
+                if value.is_null() {
+                    return au_sys::kAudioUnitErr_InvalidPropertyValue;
+                }
+
+                let mut number = -1 as au_sys::SInt32;
+                au_sys::CFNumberGetValue(
+                    value as _,
+                    au_sys::kCFNumberSInt32Type as _,
+                    &raw mut number as _,
+                );
+
+                if number != target {
+                    au_sys::kAudioUnitErr_InvalidPropertyValue
+                } else {
+                    NO_ERROR
+                }
+            };
+
+            os_status = check_num(KEYS.version, AU_PRESET_VERSION);
+            if os_status != NO_ERROR {
+                return os_status;
+            }
+
+            os_status = check_num(KEYS.type_, desc.componentType as _);
+            if os_status != NO_ERROR {
+                return os_status;
+            }
+
+            os_status = check_num(KEYS.subtype, desc.componentSubType as _);
+            if os_status != NO_ERROR {
+                return os_status;
+            }
+
+            os_status = check_num(KEYS.manufacturer, desc.componentManufacturer as _);
+            if os_status != NO_ERROR {
+                return os_status;
+            }
+
+            let data_value = au_sys::CFDictionaryGetValue(dict, KEYS.data);
+            if data_value.is_null() {
+                return au_sys::kAudioUnitErr_InvalidPropertyValue;
+            }
+            let data = au_sys::CFDataGetBytePtr(data_value as _);
+            if data.is_null() {
+                return au_sys::kAudioUnitErr_InvalidPropertyValue;
+            }
+            let data_len = au_sys::CFDataGetLength(data_value as _);
+            let data_slice = slice_from_raw_parts(data, data_len as usize);
+            if !wrapper.set_state_json(&*data_slice) {
+                return au_sys::kAudioUnitErr_InvalidPropertyValue;
+            }
+
+            let name_value = au_sys::CFDictionaryGetValue(dict, KEYS.name) as au_sys::CFStringRef;
+            if name_value.is_null() {
+                // NOTE: Use the default preset.
+                wrapper.set_preset(None);
+            } else {
+                wrapper.set_preset(Some(au_sys::AUPreset {
+                    presetNumber: -1,
+                    presetName: name_value,
+                }));
+            }
+            wrapper.call_property_listeners(
+                au_sys::kAudioUnitProperty_PresentPreset,
+                au_sys::kAudioUnitScope_Global,
+                0,
+            );
+
+            os_status
+        }
     }
 
     fn reset_impl(
@@ -1446,11 +1547,8 @@ declare_property!(
         _in_element: au_sys::AudioUnitElement,
         out_data: &mut Type,
     ) -> au_sys::OSStatus {
-        // TODO
         *out_data = *wrapper.preset();
-        unsafe {
-            au_sys::CFRetain(out_data.presetName as _);
-        }
+        retain_CFStringRef(out_data.presetName);
         NO_ERROR
     }
 
@@ -1460,8 +1558,7 @@ declare_property!(
         _in_element: au_sys::AudioUnitElement,
         in_data: &Type,
     ) -> au_sys::OSStatus {
-        // TODO
-        wrapper.set_preset(*in_data);
+        wrapper.set_preset(Some(*in_data));
         NO_ERROR
     }
 

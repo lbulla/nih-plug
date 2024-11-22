@@ -1,9 +1,12 @@
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::num::NonZeroU32;
 use std::ptr::{copy_nonoverlapping, null_mut};
+use std::sync::LazyLock;
 
 use crate::wrapper::au::au_sys;
-use crate::wrapper::au::util::{release_CFStringRef, utf8_to_CFStringRef, ThreadWrapper};
+use crate::wrapper::au::util::{
+    release_CFStringRef, retain_CFStringRef, utf8_to_const_CFStringRef, ThreadWrapper,
+};
 
 // ---------- AudioUnit ---------- //
 
@@ -11,8 +14,8 @@ pub(super) type AudioUnit = ThreadWrapper<au_sys::AudioUnit>;
 
 // ---------- AuPreset ---------- //
 
-// TODO
-const DEFAULT_PRESET_NAME: &[u8] = b"Untitled\0";
+static DEFAULT_PRESET_NAME: LazyLock<ThreadWrapper<au_sys::CFStringRef>> =
+    LazyLock::new(|| ThreadWrapper::new(utf8_to_const_CFStringRef(b"Untitled\0")));
 
 pub(super) struct AuPreset(au_sys::AUPreset);
 
@@ -25,16 +28,25 @@ impl AuPreset {
         &self.0
     }
 
-    pub(super) fn set(&mut self, preset: au_sys::AUPreset) {
+    pub(super) fn set(&mut self, preset: Option<au_sys::AUPreset>) {
+        let preset = preset.unwrap_or(Self::make_default());
+
         release_CFStringRef(self.0.presetName);
         self.0 = preset;
+        retain_CFStringRef(self.0.presetName);
     }
 
     fn make_default() -> au_sys::AUPreset {
         au_sys::AUPreset {
             presetNumber: -1,
-            presetName: utf8_to_CFStringRef(DEFAULT_PRESET_NAME),
+            presetName: DEFAULT_PRESET_NAME.get(),
         }
+    }
+}
+
+impl Drop for AuPreset {
+    fn drop(&mut self) {
+        release_CFStringRef(self.0.presetName);
     }
 }
 

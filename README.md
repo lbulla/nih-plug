@@ -20,10 +20,10 @@ subject to a lot of changes.
 - The Editor can be opened and resized internally (VIZIA only)
 - Audio is being processed
 - Parameters are implemented
+- The state of a plugin is preserved
 
 ### Roadmap
 
-- State
 - Transport
 - MIDI
 - Pass validation (auval)

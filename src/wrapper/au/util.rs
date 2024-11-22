@@ -45,10 +45,6 @@ impl CFString {
         Self(str_to_CFStringRef(string))
     }
 
-    pub(super) fn from_utf8(utf8: &[u8]) -> Self {
-        Self(utf8_to_CFStringRef(utf8))
-    }
-
     pub(super) fn get(&self) -> au_sys::CFStringRef {
         self.0
     }
@@ -60,10 +56,6 @@ impl CFString {
 
     pub(super) fn set_str(&mut self, string: &str) {
         self.set(str_to_CFStringRef(string));
-    }
-
-    pub(super) fn set_utf8(&mut self, utf8: &[u8]) {
-        self.set(utf8_to_CFStringRef(utf8));
     }
 
     fn release(&mut self) {
@@ -105,17 +97,29 @@ pub(super) fn CFStringRef_to_string(string_ref: au_sys::CFStringRef) -> String {
     cstr.to_str().unwrap().to_owned()
 }
 
-#[must_use]
 #[allow(non_snake_case)]
-pub(super) fn utf8_to_CFStringRef(utf8: &[u8]) -> au_sys::CFStringRef {
-    unsafe { au_sys::__CFStringMakeConstantString(utf8.as_ptr() as _) }
+pub(super) fn retain_CFStringRef(string_ref: au_sys::CFStringRef) {
+    unsafe {
+        if !string_ref.is_null() {
+            au_sys::CFRetain(string_ref as _);
+        }
+    }
 }
 
 #[allow(non_snake_case)]
 pub(super) fn release_CFStringRef(string_ref: au_sys::CFStringRef) {
     unsafe {
-        au_sys::CFRelease(string_ref as _);
+        if !string_ref.is_null() {
+            au_sys::CFRelease(string_ref as _);
+        }
     }
+}
+
+// NOTE: Compile time string. No need to release it, but there is no harm in doing so.
+#[must_use]
+#[allow(non_snake_case)]
+pub(super) fn utf8_to_const_CFStringRef(utf8: &[u8]) -> au_sys::CFStringRef {
+    unsafe { au_sys::__CFStringMakeConstantString(utf8.as_ptr() as _) }
 }
 
 #[must_use]
