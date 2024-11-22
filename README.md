@@ -21,10 +21,10 @@ subject to a lot of changes.
 - Audio is being processed
 - Parameters are implemented
 - The state of a plugin is preserved
+- Transport information is gathered from the host
 
 ### Roadmap
 
-- Transport
 - MIDI
 - Pass validation (auval)
 - macOS version restrictions (some features are only available in newer versions)
