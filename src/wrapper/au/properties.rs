@@ -83,6 +83,7 @@ pub(super) enum PropertyDispatcher {
     BypassEffectProperty,
     LastRenderErrorProperty,
     SetRenderCallbackProperty,
+    HostCallbacksProperty,
     ElementNameProperty,
     CocoaUIProperty,
     SupportedChannelLayoutTagsProperty,
@@ -1341,6 +1342,40 @@ declare_property!(
                 element.set_render_callback_struct(*in_data);
                 NO_ERROR
             })
+    }
+
+    fn reset_impl(
+        _wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
+declare_property!(
+    pub(super) struct HostCallbacksProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_HostCallbacks;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::HostCallbackInfo;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        default_size!()
+    }
+
+    fn set_impl(
+        wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        in_data: &Type,
+    ) -> au_sys::OSStatus {
+        wrapper.set_host_callback_info(*in_data);
+        NO_ERROR
     }
 
     fn reset_impl(

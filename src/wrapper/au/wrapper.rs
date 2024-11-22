@@ -13,6 +13,7 @@ use std::any::Any;
 use std::collections::hash_map::Keys;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
+use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -24,7 +25,7 @@ use crate::prelude::{
     Param, ParamFlags, ParamPtr, Params, ParentWindowHandle, PluginState, ProcessMode,
     ProcessStatus, SmoothingStyle, TaskExecutor, Transport,
 };
-use crate::wrapper::au::au_types::{AuParamEvent, AuPreset, AudioUnit};
+use crate::wrapper::au::au_types::{AuHostCallbackInfo, AuParamEvent, AuPreset, AudioUnit};
 use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use crate::wrapper::au::editor::WrapperViewHolder;
 use crate::wrapper::au::properties::{PropertyDispatcher, PropertyDispatcherImpl};
@@ -283,6 +284,7 @@ pub(super) struct Wrapper<P: AuPlugin> {
     tail_seconds: AtomicCell<au_sys::Float64>,
     last_render_error: AtomicCell<au_sys::OSStatus>,
     last_render_sample_time: AtomicF64,
+    host_callback_info: AtomicRefCell<Option<AuHostCallbackInfo>>,
     initialized: AtomicBool,
 
     updated_state_sender: Sender<PluginState>,
@@ -442,6 +444,7 @@ impl<P: AuPlugin> Wrapper<P> {
             tail_seconds: AtomicCell::new(0.0),
             last_render_error: AtomicCell::new(NO_ERROR),
             last_render_sample_time: AtomicF64::new(DEFAULT_LAST_RENDER_SAMPLE_TIME),
+            host_callback_info: AtomicRefCell::new(None),
             initialized: AtomicBool::new(false),
 
             updated_state_sender,
@@ -494,26 +497,13 @@ impl<P: AuPlugin> Wrapper<P> {
         self.initialized.load(Ordering::SeqCst)
     }
 
-    // ---------- Contexts ---------- //
+    // ---------- Editor ---------- //
 
     fn make_gui_context(&self) -> Arc<WrapperGuiContext<P>> {
         Arc::new(WrapperGuiContext {
             wrapper: self.as_arc(),
         })
     }
-
-    fn make_init_context(&self) -> WrapperInitContext<P> {
-        WrapperInitContext { wrapper: self }
-    }
-
-    fn make_process_context(&self, transport: Transport) -> WrapperProcessContext<P> {
-        WrapperProcessContext {
-            wrapper: self,
-            transport,
-        }
-    }
-
-    // ---------- Editor ---------- //
 
     pub(super) fn has_editor(&self) -> bool {
         self.editor.borrow().is_some()
@@ -579,6 +569,10 @@ impl<P: AuPlugin> Wrapper<P> {
                 0,
             );
         }
+    }
+
+    fn make_init_context(&self) -> WrapperInitContext<P> {
+        WrapperInitContext { wrapper: self }
     }
 
     pub(super) fn init(&mut self) -> au_sys::OSStatus {
@@ -1164,6 +1158,114 @@ impl<P: AuPlugin> Wrapper<P> {
         self.last_render_sample_time() != DEFAULT_LAST_RENDER_SAMPLE_TIME
     }
 
+    pub(super) fn set_host_callback_info(&self, info: au_sys::HostCallbackInfo) {
+        *self.host_callback_info.borrow_mut() = Some(AuHostCallbackInfo::new(info));
+    }
+
+    fn make_process_context(&self, sample_rate: f32) -> WrapperProcessContext<P> {
+        let mut transport = Transport::new(sample_rate);
+        if let Some(info) = self
+            .host_callback_info
+            .borrow()
+            .as_ref()
+            .map(|info| info.as_ref())
+        {
+            if let Some(beat_tempo_proc) = info.beatAndTempoProc {
+                let mut current_beat = 0.0;
+                let mut current_tempo = 0.0;
+                unsafe {
+                    if beat_tempo_proc(
+                        info.hostUserData,
+                        &raw mut current_beat,
+                        &raw mut current_tempo,
+                    ) == NO_ERROR
+                    {
+                        transport.tempo = Some(current_tempo);
+                        transport.pos_beats = Some(current_beat);
+                    }
+                }
+            }
+
+            if let Some(time_proc) = info.musicalTimeLocationProc {
+                let mut time_sig_num = 0.0;
+                let mut time_sig_denom = 0;
+                let mut current_measure_down_beat = 0.0;
+                unsafe {
+                    if time_proc(
+                        info.hostUserData,
+                        null_mut(),
+                        &raw mut time_sig_num,
+                        &raw mut time_sig_denom,
+                        &raw mut current_measure_down_beat,
+                    ) == NO_ERROR
+                    {
+                        transport.time_sig_numerator = Some(time_sig_num as _);
+                        transport.time_sig_denominator = Some(time_sig_denom as _);
+                        transport.bar_start_pos_beats = Some(current_measure_down_beat);
+                    }
+                }
+            }
+
+            if let Some(transport_proc) = info.transportStateProc2 {
+                let mut is_playing = 0;
+                let mut is_recording = 0;
+                let mut current_sample_in_time_line = 0.0;
+                let mut is_cycling = 0;
+                let mut cycle_start_beat = 0.0;
+                let mut cycle_end_beat = 0.0;
+                unsafe {
+                    if transport_proc(
+                        info.hostUserData,
+                        &raw mut is_playing,
+                        &raw mut is_recording,
+                        null_mut(),
+                        &raw mut current_sample_in_time_line,
+                        &raw mut is_cycling,
+                        &raw mut cycle_start_beat,
+                        &raw mut cycle_end_beat,
+                    ) == NO_ERROR
+                    {
+                        transport.playing = is_playing > 0;
+                        transport.recording = is_recording > 0;
+                        transport.pos_samples = Some(current_sample_in_time_line as _);
+                        if is_cycling > 0 {
+                            transport.loop_range_beats = Some((cycle_start_beat, cycle_end_beat));
+                        }
+                    }
+                }
+            } else if let Some(transport_proc) = info.transportStateProc {
+                let mut is_playing = 0;
+                let mut current_sample_in_time_line = 0.0;
+                let mut is_cycling = 0;
+                let mut cycle_start_beat = 0.0;
+                let mut cycle_end_beat = 0.0;
+                unsafe {
+                    if transport_proc(
+                        info.hostUserData,
+                        &raw mut is_playing,
+                        null_mut(),
+                        &raw mut current_sample_in_time_line,
+                        &raw mut is_cycling,
+                        &raw mut cycle_start_beat,
+                        &raw mut cycle_end_beat,
+                    ) == NO_ERROR
+                    {
+                        transport.playing = is_playing > 0;
+                        transport.pos_samples = Some(current_sample_in_time_line as _);
+                        if is_cycling > 0 {
+                            transport.loop_range_beats = Some((cycle_start_beat, cycle_end_beat));
+                        }
+                    }
+                }
+            }
+        }
+
+        WrapperProcessContext {
+            wrapper: self,
+            transport,
+        }
+    }
+
     pub(super) fn reset(
         &self,
         _in_scope: au_sys::AudioUnitScope,
@@ -1221,10 +1323,8 @@ impl<P: AuPlugin> Wrapper<P> {
                     }
 
                     let mut buffer_manager = self.buffer_manager.borrow_mut();
-
                     let sample_rate = self.sample_rate();
-                    let transport = Transport::new(sample_rate);
-                    let mut context = self.make_process_context(transport);
+                    let mut context = self.make_process_context(sample_rate);
 
                     let mut process = |block_start: u32, block_length: u32| {
                         let buffers = buffer_manager.create_buffers(
