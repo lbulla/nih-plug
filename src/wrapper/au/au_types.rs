@@ -296,3 +296,7 @@ impl AuParamEvent {
 
 unsafe impl Send for AuParamEvent {}
 unsafe impl Sync for AuParamEvent {}
+
+// ---------- AuHostCallbackInfo ---------- //
+
+pub(super) type AuHostCallbackInfo = ThreadWrapper<au_sys::HostCallbackInfo>;
