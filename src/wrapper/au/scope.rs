@@ -1,20 +1,48 @@
 use atomic_refcell::AtomicRefCell;
+use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::ptr::{null_mut, NonNull};
 
-use crate::wrapper::au::au_sys;
 use crate::wrapper::au::au_types::{AuBufferList, AuConnection, AuRenderCallbackStruct};
 use crate::wrapper::au::layout::{layout_tag_from_channels, layout_tag_to_channels};
-use crate::wrapper::au::util::{CFString, ChannelPointerVec};
+use crate::wrapper::au::util::{CFString, ChannelPointerVec, ThreadWrapper};
+use crate::wrapper::au::{au_sys, NO_ERROR};
 use crate::wrapper::util::buffer_management::ChannelPointers;
 
 // ---------- IoElement ---------- //
+
+struct BufferConverter {
+    main_sample_rate: au_sys::Float64,
+    ref_: ThreadWrapper<au_sys::AudioConverterRef>,
+}
+
+impl Drop for BufferConverter {
+    fn drop(&mut self) {
+        unsafe {
+            au_sys::AudioConverterDispose(self.ref_.get());
+        }
+    }
+}
+
+unsafe extern "C" fn convert_buffer(
+    _in_audio_converter: au_sys::AudioConverterRef,
+    _io_number_data_packets: *mut au_sys::UInt32,
+    io_data: *mut au_sys::AudioBufferList,
+    _out_data_packet_description: *mut *mut au_sys::AudioStreamPacketDescription,
+    in_user_data: *mut c_void,
+) -> au_sys::OSStatus {
+    let io_element = &*(in_user_data as *const IoElement);
+    io_element.copy_buffer_list_to(io_data);
+    NO_ERROR
+}
 
 struct BufferHandler {
     // TODO: Save buffer size?
     buffer: Option<Vec<f32>>,
     buffer_list: AuBufferList,
     buffer_ptrs: ChannelPointerVec,
+
+    converter: Option<BufferConverter>,
 }
 
 impl BufferHandler {
@@ -23,6 +51,8 @@ impl BufferHandler {
             buffer: None,
             buffer_list: AuBufferList::new(num_channels),
             buffer_ptrs: ChannelPointerVec::from_num_buffers(num_channels),
+
+            converter: None,
         }
     }
 
@@ -70,6 +100,84 @@ impl BufferHandler {
             ptrs: NonNull::new(buffer_ptrs.as_mut_ptr()).unwrap(),
             num_channels: buffer_ptrs.len(),
         })
+    }
+
+    // FIXME: Not sure how to test this properly yet due to its unusual nature.
+    //        `auval` passes though.
+    // NOTE: `main_sample_rate` => Sample rate of the first output element.
+    fn init_converter(
+        &mut self,
+        stream_format: &au_sys::AudioStreamBasicDescription,
+        main_sample_rate: au_sys::Float64,
+        is_output: bool,
+    ) -> bool {
+        // TODO: We check only the sample rate at the moment which is the only thing
+        //       that can differ. In future, we might have to check more (e.g. sample size)
+        //       and implement a more complex buffer handling.
+        //       Plus, we could also implement options like the quality of the resampling.
+        if main_sample_rate == stream_format.mSampleRate {
+            self.converter = None;
+            true
+        } else {
+            if let Some(converter) = self.converter.as_ref() {
+                if main_sample_rate == converter.main_sample_rate {
+                    return true;
+                }
+            }
+
+            let mut main_stream_format = stream_format.clone();
+            main_stream_format.mSampleRate = main_sample_rate;
+
+            let success;
+            let mut converter_ref = null_mut();
+            if is_output {
+                success = unsafe {
+                    au_sys::AudioConverterNew(
+                        &raw const main_stream_format,
+                        &raw const *stream_format,
+                        &raw mut converter_ref,
+                    )
+                } == NO_ERROR;
+            } else {
+                success = unsafe {
+                    au_sys::AudioConverterNew(
+                        &raw const *stream_format,
+                        &raw const main_stream_format,
+                        &raw mut converter_ref,
+                    )
+                } == NO_ERROR;
+            }
+
+            if success {
+                self.converter = Some(BufferConverter {
+                    main_sample_rate,
+                    ref_: ThreadWrapper::new(converter_ref),
+                });
+                true
+            } else {
+                self.converter = None;
+                false
+            }
+        }
+    }
+
+    fn convert_buffer(&self, io_element: &IoElement) -> au_sys::OSStatus {
+        if let Some(converter) = self.converter.as_ref() {
+            let mut output_packet_size = 1;
+            let mut packet_description = au_sys::AudioStreamPacketDescription::default();
+            unsafe {
+                au_sys::AudioConverterFillComplexBuffer(
+                    converter.ref_.get(),
+                    Some(convert_buffer),
+                    &raw const *io_element as _,
+                    &raw mut output_packet_size,
+                    self.buffer_list.list(),
+                    &raw mut packet_description,
+                )
+            }
+        } else {
+            NO_ERROR
+        }
     }
 }
 
@@ -218,6 +326,15 @@ impl IoElement {
             self.buffer_handler.borrow().buffer_list.copy_to(dest);
         }
     }
+
+    fn init_converter(&self, main_sample_rate: au_sys::Float64, is_output: bool) -> bool {
+        let mut buffer_handler = self.buffer_handler.borrow_mut();
+        buffer_handler.init_converter(&self.stream_format, main_sample_rate, is_output)
+    }
+
+    fn convert_buffer(&self) -> au_sys::OSStatus {
+        self.buffer_handler.borrow().convert_buffer(self)
+    }
 }
 
 // ---------- IoElementImpl ---------- //
@@ -306,6 +423,14 @@ pub(super) trait IoElementImpl {
     fn copy_buffer_list_to(&self, dest: *mut au_sys::AudioBufferList) {
         self.base().copy_buffer_list_to(dest);
     }
+
+    fn init_converter(&self, main_sample_rate: au_sys::Float64, is_output: bool) -> bool {
+        self.base().init_converter(main_sample_rate, is_output)
+    }
+
+    fn convert_buffer(&self) -> au_sys::OSStatus {
+        self.base().convert_buffer()
+    }
 }
 
 // ---------- InputElement ---------- //
@@ -374,31 +499,37 @@ impl InputElement {
             return au_sys::kAudioUnitErr_NoConnection;
         }
 
+        let os_status;
         if self.input_type == InputType::Callback {
             self.base.prepare_buffer_list(in_number_frames);
             let render_callback = self
                 .render_callback_struct
                 .as_ref()
                 .expect("`render_callback` must be `Some`");
-            render_callback.call(
+            os_status = render_callback.call(
                 io_action_flags,
                 in_time_stamp,
                 in_bus_num,
                 in_number_frames,
                 self.base.buffer_handler.borrow().buffer_list.list(),
-            )
+            );
         } else {
             self.base.prepare_buffer_list_null(in_number_frames);
             let connection = self
                 .connection
                 .as_ref()
                 .expect("`connection` must be `Some`");
-            connection.call(
+            os_status = connection.call(
                 io_action_flags,
                 in_time_stamp,
                 in_number_frames,
                 self.base.buffer_handler.borrow().buffer_list.list(),
-            )
+            );
+        }
+        if os_status == NO_ERROR {
+            self.base.convert_buffer()
+        } else {
+            os_status
         }
     }
 }
