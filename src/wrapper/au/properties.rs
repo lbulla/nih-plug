@@ -686,11 +686,6 @@ declare_property!(
     }
 );
 
-// TODO: Independent sample rates for each element
-//       though that might be uncommon for most hosts.
-//       (AU API specifications)
-//       Converter: https://developer.apple.com/documentation/audiotoolbox/1502936-audioconverternew?language=objc
-
 declare_property!(
     pub(super) struct SampleRateProperty;
 
