@@ -4,6 +4,7 @@ use std::sync::{Arc, LazyLock};
 
 use nih_plug_derive::PropertyDispatcherImpl;
 
+use crate::midi::MidiConfig;
 use crate::prelude::{AuPlugin, Param, ParamFlags, ParamPtr};
 use crate::wrapper::au::editor::WrapperViewCreator;
 use crate::wrapper::au::scope::ShouldAllocate;
@@ -91,6 +92,9 @@ pub(super) enum PropertyDispatcher {
     ParameterClumpNameProperty,
     PresentPresetProperty,
     ParameterValueFromStringProperty,
+    MidiOutputCallbackInfoProperty,
+    MidiOutputCallbackProperty,
+    MidiOutputEventListCallbackProperty,
     ShouldAllocateBufferProperty,
     LastRenderSampleTimeProperty,
 
@@ -1637,6 +1641,143 @@ declare_property!(
         } else {
             au_sys::kAudioUnitErr_InvalidParameter
         }
+    }
+);
+
+declare_property!(
+    pub(super) struct MidiOutputCallbackInfoProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_MIDIOutputCallbackInfo;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::CFArrayRef;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        if P::MIDI_OUTPUT == MidiConfig::None {
+            0
+        } else {
+            default_size!()
+        }
+    }
+
+    fn get_impl(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        out_data: &mut Type,
+    ) -> au_sys::OSStatus {
+        nih_debug_assert!(
+            P::MIDI_OUTPUT != MidiConfig::None,
+            "This should have been prevented by the size of 0"
+        );
+
+        let string = utf8_to_const_CFStringRef(b"MIDI Output\0");
+        unsafe {
+            let array = au_sys::CFArrayCreate(
+                au_sys::kCFAllocatorDefault,
+                &raw const string as _,
+                1,
+                &raw const au_sys::kCFTypeArrayCallBacks,
+            );
+            *out_data = array;
+        }
+
+        NO_ERROR
+    }
+);
+
+declare_property!(
+    pub(super) struct MidiOutputCallbackProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_MIDIOutputCallback;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AUMIDIOutputCallbackStruct;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        if P::MIDI_OUTPUT == MidiConfig::None {
+            0
+        } else {
+            default_size!()
+        }
+    }
+
+    fn set_impl(
+        wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        in_data: &Type,
+    ) -> au_sys::OSStatus {
+        nih_debug_assert!(
+            P::MIDI_OUTPUT != MidiConfig::None,
+            "This should have been prevented by the size of 0"
+        );
+        wrapper.set_midi_output_callback_struct(*in_data);
+        NO_ERROR
+    }
+
+    fn reset_impl(
+        _wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        nih_debug_assert!(
+            P::MIDI_OUTPUT != MidiConfig::None,
+            "This should have been prevented by the size of 0"
+        );
+        au_sys::kAudioUnitErr_PropertyNotWritable
+    }
+);
+
+declare_property!(
+    pub(super) struct MidiOutputEventListCallbackProperty;
+
+    const ID: au_sys::AudioUnitPropertyID = au_sys::kAudioUnitProperty_MIDIOutputEventListCallback;
+    const SCOPES: &'static [au_sys::AudioUnitScope] = GLOBAL_SCOPE;
+    type Type = au_sys::AUMIDIEventListBlock;
+
+    fn size(
+        _wrapper: &Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::UInt32 {
+        if P::MIDI_OUTPUT == MidiConfig::None {
+            0
+        } else {
+            default_size!()
+        }
+    }
+
+    fn set_impl(
+        wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+        in_data: &Type,
+    ) -> au_sys::OSStatus {
+        nih_debug_assert!(
+            P::MIDI_OUTPUT != MidiConfig::None,
+            "This should have been prevented by the size of 0"
+        );
+        wrapper.set_midi_output_callback_block(*in_data);
+        NO_ERROR
+    }
+
+    fn reset_impl(
+        _wrapper: &mut Wrapper<P>,
+        _in_scope: au_sys::AudioUnitScope,
+        _in_element: au_sys::AudioUnitElement,
+    ) -> au_sys::OSStatus {
+        nih_debug_assert!(
+            P::MIDI_OUTPUT != MidiConfig::None,
+            "This should have been prevented by the size of 0"
+        );
+        au_sys::kAudioUnitErr_PropertyNotWritable
     }
 );
 

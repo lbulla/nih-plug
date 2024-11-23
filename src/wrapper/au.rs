@@ -17,6 +17,7 @@ use std::sync::Arc;
 pub use coreaudio_sys as au_sys;
 pub(self) use wrapper::Wrapper;
 
+use crate::midi::MidiConfig;
 use crate::prelude::AuPlugin;
 
 // ---------- Constants ---------- //
@@ -118,6 +119,27 @@ impl<P: AuPlugin> PluginInstance<P> {
             au_sys::kAudioUnitRemovePropertyListenerWithUserDataSelect => Some(transmute(
                 Self::remove_property_listener_data as *const c_void,
             )),
+            au_sys::kMusicDeviceMIDIEventSelect => {
+                if P::MIDI_INPUT != MidiConfig::None {
+                    Some(transmute(Self::midi_event as *const c_void))
+                } else {
+                    None
+                }
+            }
+            au_sys::kMusicDeviceSysExSelect => {
+                if P::MIDI_INPUT != MidiConfig::None {
+                    Some(transmute(Self::sys_ex as *const c_void))
+                } else {
+                    None
+                }
+            }
+            au_sys::kMusicDeviceMIDIEventListSelect => {
+                if P::MIDI_INPUT != MidiConfig::None {
+                    Some(transmute(Self::midi_event_list as *const c_void))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -283,6 +305,35 @@ impl<P: AuPlugin> PluginInstance<P> {
     ) -> au_sys::OSStatus {
         let wrapper = Self::wrapper_from_this(this);
         wrapper.remove_property_listener(in_id, in_proc, in_proc_data)
+    }
+
+    unsafe extern "C" fn midi_event(
+        this: *mut c_void,
+        in_status: au_sys::UInt32,
+        in_data1: au_sys::UInt32,
+        in_data2: au_sys::UInt32,
+        in_offset_sample_frame: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.midi_event(in_status, in_data1, in_data2, in_offset_sample_frame)
+    }
+
+    unsafe extern "C" fn sys_ex(
+        this: *mut c_void,
+        in_data: *const au_sys::UInt8,
+        in_length: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.sys_ex(in_data, in_length)
+    }
+
+    unsafe extern "C" fn midi_event_list(
+        this: *mut c_void,
+        in_offset_sample_frame: au_sys::UInt32,
+        in_event_list: *const au_sys::MIDIEventList,
+    ) -> au_sys::OSStatus {
+        let wrapper = Self::wrapper_from_this(this);
+        wrapper.midi_event_list(in_offset_sample_frame, in_event_list)
     }
 
     unsafe fn wrapper_from_this(this: *mut c_void) -> &'static mut Wrapper<P> {
