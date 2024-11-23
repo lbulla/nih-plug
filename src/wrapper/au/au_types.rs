@@ -1,12 +1,19 @@
+use block2::ffi::_Block_copy;
+use block2::{Block, RcBlock};
 use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::ffi::c_void;
+use std::mem::transmute;
 use std::num::NonZeroU32;
 use std::ptr::{copy_nonoverlapping, null_mut};
 use std::sync::LazyLock;
 
+use crate::midi::MidiResult;
+use crate::prelude::AuPlugin;
 use crate::wrapper::au::au_sys;
 use crate::wrapper::au::util::{
     release_CFStringRef, retain_CFStringRef, utf8_to_const_CFStringRef, ThreadWrapper,
 };
+use crate::wrapper::au::wrapper::EventRef;
 
 // ---------- AudioUnit ---------- //
 
@@ -300,3 +307,233 @@ unsafe impl Sync for AuParamEvent {}
 // ---------- AuHostCallbackInfo ---------- //
 
 pub(super) type AuHostCallbackInfo = ThreadWrapper<au_sys::HostCallbackInfo>;
+
+// ---------- AuMidiOutputCallback ---------- //
+
+pub(super) enum AuMidiOutputCallback {
+    Block(AuMidiOutputCallbackBlock),
+    Struct(AuMidiOutputCallbackStruct), // NOTE: Deprecated (e.g. `MIDIPacketListInit`).
+}
+
+unsafe impl Send for AuMidiOutputCallback {}
+unsafe impl Sync for AuMidiOutputCallback {}
+
+pub(super) trait AuMidiOutputCallbackHandler: seal::AuMidiOutputCallbackHandlerSeal {
+    fn new(base: Self::Base) -> Self;
+
+    unsafe fn handle_events<P: AuPlugin>(
+        &self,
+        audio_time_stamp: *const au_sys::AudioTimeStamp,
+        mut events: EventRef<P>,
+    ) {
+        let mut event_packet = self.init();
+
+        while let Some(event) = events.pop_front() {
+            let midi_time_stamp = event.timing() as au_sys::MIDITimeStamp;
+
+            if let Some(midi_result) = event.as_midi() {
+                match midi_result {
+                    MidiResult::Basic(midi) => {
+                        event_packet = self.add(event_packet, midi_time_stamp, midi);
+                        if event_packet.is_null() {
+                            self.send(audio_time_stamp);
+                            event_packet = self.init();
+                            event_packet = self.add(event_packet, midi_time_stamp, midi);
+
+                            if event_packet.is_null() {
+                                nih_debug_assert!(
+                                    false,
+                                    "MIDI event packet size exceeds `MAX_MIDI_LIST_SIZE`"
+                                );
+                                event_packet = self.init();
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        self.send(audio_time_stamp);
+    }
+}
+
+use seal::AuMidiOutputCallbackHandlerSeal;
+mod seal {
+    use super::{au_sys, Layout};
+
+    // NOTE: Defined in `MIDIMessage.h`.
+    pub const MAX_MIDI_LIST_SIZE: au_sys::ByteCount = 65536;
+
+    pub trait AuMidiOutputCallbackHandlerSeal {
+        type Base;
+        type List;
+        type EventPacket;
+
+        unsafe fn init(&self) -> *mut Self::EventPacket;
+
+        unsafe fn add(
+            &self,
+            event_packet: *mut Self::EventPacket,
+            midi_time_stamp: au_sys::MIDITimeStamp,
+            midi: [u8; 3],
+        ) -> *mut Self::EventPacket;
+
+        unsafe fn send(&self, audio_time_stamp: *const au_sys::AudioTimeStamp);
+
+        unsafe fn make_layout() -> Layout {
+            Layout::from_size_align_unchecked(MAX_MIDI_LIST_SIZE as _, align_of::<Self::List>())
+        }
+    }
+}
+
+type AuMidiOutputEventListCallback =
+    dyn Fn(au_sys::AUEventSampleTime, au_sys::UInt8, *const c_void) -> au_sys::OSStatus;
+
+pub(super) struct AuMidiOutputCallbackBlock {
+    block: RcBlock<AuMidiOutputEventListCallback>,
+    list: *mut au_sys::MIDIEventList,
+}
+
+impl AuMidiOutputCallbackHandler for AuMidiOutputCallbackBlock {
+    fn new(base: au_sys::AUMIDIEventListBlock) -> Self {
+        unsafe {
+            // FIXME: Should probably be part of `block2`.
+            let base = _Block_copy(base);
+            let block: *mut Block<AuMidiOutputEventListCallback> = transmute(base);
+            let block = RcBlock::from_raw(block)
+                .expect("Failed to create `RcBlock` for `AuMidiOutputCallbackBlock`");
+
+            let layout = Self::make_layout();
+            let list = alloc(layout) as *mut au_sys::MIDIEventList;
+
+            Self { block, list }
+        }
+    }
+}
+
+impl AuMidiOutputCallbackHandlerSeal for AuMidiOutputCallbackBlock {
+    type Base = au_sys::AUMIDIEventListBlock;
+    type List = au_sys::MIDIEventList;
+    type EventPacket = au_sys::MIDIEventPacket;
+
+    unsafe fn init(&self) -> *mut au_sys::MIDIEventPacket {
+        au_sys::MIDIEventListInit(self.list, au_sys::kMIDIProtocol_1_0 as _)
+    }
+
+    // NOTE: Copied from `MIDIMessage.h`:
+    /*
+       MIDI 1.0 Universal MIDI Packet (MIDI-1UP) Channel Voice Message generalized structure
+
+       Word0: [aaaa][bbbb][cccc][dddd][0eeeeeee][0fffffff]
+
+       a: Universal MIDI Packet Message Type (0x2 for all voice messages)
+       b: Channel group number
+       c: MIDI status
+       d: MIDI channel
+       e: MIDI note number
+       f: Velocity
+    */
+    unsafe fn add(
+        &self,
+        event_packet: *mut au_sys::MIDIEventPacket,
+        midi_time_stamp: au_sys::MIDITimeStamp,
+        midi: [u8; 3],
+    ) -> *mut au_sys::MIDIEventPacket {
+        // FIXME: Should be part of `coremidi-sys` (https://docs.rs/coremidi-sys/latest/coremidi_sys/)
+        //        since there are conversion functions for this in `MIDIMessage.h`.
+        let mut extra_byte;
+        if (midi[0] & 0xf0) == 0xf0 {
+            extra_byte = 0x1; // NOTE: `kMIDIMessageTypeSystem`
+        } else {
+            extra_byte = 0x2; // NOTE: `kMIDIMessageTypeChannelVoice1`
+        }
+        extra_byte <<= 0x4;
+        let midi = au_sys::UInt32::from_be_bytes([extra_byte, midi[0], midi[1], midi[2]]);
+
+        au_sys::MIDIEventListAdd(
+            self.list,
+            seal::MAX_MIDI_LIST_SIZE,
+            event_packet,
+            midi_time_stamp,
+            1,
+            &raw const midi,
+        )
+    }
+
+    unsafe fn send(&self, audio_time_stamp: *const au_sys::AudioTimeStamp) {
+        self.block.call((
+            (*audio_time_stamp).mSampleTime as _,
+            0,
+            self.list.cast_const() as _,
+        ));
+    }
+}
+
+impl Drop for AuMidiOutputCallbackBlock {
+    fn drop(&mut self) {
+        unsafe {
+            let layout = Self::make_layout();
+            dealloc(self.list as _, layout);
+        }
+    }
+}
+
+pub(super) struct AuMidiOutputCallbackStruct {
+    base: au_sys::AUMIDIOutputCallbackStruct,
+    list: *mut au_sys::MIDIPacketList,
+}
+
+impl AuMidiOutputCallbackHandler for AuMidiOutputCallbackStruct {
+    fn new(base: au_sys::AUMIDIOutputCallbackStruct) -> Self {
+        unsafe {
+            let layout = Self::make_layout();
+            let list = alloc(layout) as *mut au_sys::MIDIPacketList;
+
+            Self { base, list }
+        }
+    }
+}
+
+impl AuMidiOutputCallbackHandlerSeal for AuMidiOutputCallbackStruct {
+    type Base = au_sys::AUMIDIOutputCallbackStruct;
+    type List = au_sys::MIDIPacketList;
+    type EventPacket = au_sys::MIDIPacket;
+
+    unsafe fn init(&self) -> *mut au_sys::MIDIPacket {
+        au_sys::MIDIPacketListInit(self.list)
+    }
+
+    unsafe fn add(
+        &self,
+        packet: *mut au_sys::MIDIPacket,
+        midi_time_stamp: au_sys::MIDITimeStamp,
+        midi: [u8; 3],
+    ) -> *mut au_sys::MIDIPacket {
+        au_sys::MIDIPacketListAdd(
+            self.list,
+            seal::MAX_MIDI_LIST_SIZE,
+            packet,
+            midi_time_stamp,
+            3,
+            midi.as_ptr(),
+        )
+    }
+
+    unsafe fn send(&self, audio_time_stamp: *const au_sys::AudioTimeStamp) {
+        let callback = self
+            .base
+            .midiOutputCallback
+            .expect("`midiOutputCallback` should be `Some`");
+        (callback)(self.base.userData, audio_time_stamp, 0, self.list);
+    }
+}
+
+impl Drop for AuMidiOutputCallbackStruct {
+    fn drop(&mut self) {
+        unsafe {
+            let layout = Self::make_layout();
+            dealloc(self.list as _, layout);
+        }
+    }
+}

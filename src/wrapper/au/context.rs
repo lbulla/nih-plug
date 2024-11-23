@@ -5,7 +5,7 @@ use crate::prelude::{
     AuPlugin, GuiContext, InitContext, ParamPtr, PluginApi, PluginNoteEvent, PluginState,
     ProcessContext, Transport,
 };
-use crate::wrapper::au::wrapper::{EditorParamEvent, Task};
+use crate::wrapper::au::wrapper::{EditorParamEvent, EventRef, Task};
 use crate::wrapper::au::Wrapper;
 
 // ---------- WrapperGuiContext ---------- //
@@ -101,6 +101,8 @@ impl<'a, P: AuPlugin> InitContext<P> for WrapperInitContext<'a, P> {
 pub(super) struct WrapperProcessContext<'a, P: AuPlugin> {
     pub(super) wrapper: &'a Wrapper<P>,
     pub(super) transport: Transport,
+    pub(super) input_events_guard: EventRef<'a, P>,
+    pub(super) output_events_guard: EventRef<'a, P>,
 }
 
 impl<'a, P: AuPlugin> ProcessContext<P> for WrapperProcessContext<'a, P> {
@@ -123,10 +125,12 @@ impl<'a, P: AuPlugin> ProcessContext<P> for WrapperProcessContext<'a, P> {
     }
 
     fn next_event(&mut self) -> Option<PluginNoteEvent<P>> {
-        None
+        self.input_events_guard.pop_front()
     }
 
-    fn send_event(&mut self, _event: PluginNoteEvent<P>) {}
+    fn send_event(&mut self, event: PluginNoteEvent<P>) {
+        self.output_events_guard.push_back(event);
+    }
 
     fn set_latency_samples(&self, samples: u32) {
         self.wrapper.set_latency_samples(samples);
