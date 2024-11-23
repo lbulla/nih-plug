@@ -358,42 +358,48 @@ impl<P: AuPlugin> Wrapper<P> {
             },
         });
 
-        let audio_io_layout = P::AUDIO_IO_LAYOUTS.first().copied().unwrap_or_default();
+        let audio_io_layout;
         let mut input_scope = IoScope::new();
         let mut output_scope = IoScope::new();
 
-        if let Some(main_input_channels) = audio_io_layout.main_input_channels {
-            input_scope.elements.push(InputElement::new(
-                audio_io_layout.main_input_name(),
-                DEFAULT_SAMPLE_RATE as _,
-                main_input_channels,
-            ));
-        }
-        if let Some(main_output_channels) = audio_io_layout.main_output_channels {
-            output_scope.elements.push(OutputElement::new(
-                audio_io_layout.main_output_name(),
-                DEFAULT_SAMPLE_RATE as _,
-                main_output_channels,
-            ));
-        }
+        if P::AUDIO_IO_LAYOUTS.is_empty() {
+            audio_io_layout = AudioIOLayout::default();
+        } else {
+            audio_io_layout = P::AUDIO_IO_LAYOUTS[0];
 
-        for i in 0..audio_io_layout.aux_input_ports.len() {
-            input_scope.elements.push(InputElement::new(
-                audio_io_layout.aux_input_name(i).unwrap(),
-                DEFAULT_SAMPLE_RATE as _,
-                audio_io_layout.aux_input_ports[i],
-            ));
-        }
-        for i in 0..audio_io_layout.aux_output_ports.len() {
-            output_scope.elements.push(OutputElement::new(
-                audio_io_layout.aux_output_name(i).unwrap(),
-                DEFAULT_SAMPLE_RATE as _,
-                audio_io_layout.aux_output_ports[i],
-            ));
-        }
+            if let Some(main_input_channels) = audio_io_layout.main_input_channels {
+                input_scope.elements.push(InputElement::new(
+                    audio_io_layout.main_input_name(),
+                    DEFAULT_SAMPLE_RATE as _,
+                    main_input_channels,
+                ));
+            }
+            if let Some(main_output_channels) = audio_io_layout.main_output_channels {
+                output_scope.elements.push(OutputElement::new(
+                    audio_io_layout.main_output_name(),
+                    DEFAULT_SAMPLE_RATE as _,
+                    main_output_channels,
+                ));
+            }
 
-        for element in output_scope.elements.iter_mut().skip(1) {
-            element.set_should_allocate(ShouldAllocate::Force);
+            for i in 0..audio_io_layout.aux_input_ports.len() {
+                input_scope.elements.push(InputElement::new(
+                    audio_io_layout.aux_input_name(i).unwrap(),
+                    DEFAULT_SAMPLE_RATE as _,
+                    audio_io_layout.aux_input_ports[i],
+                ));
+            }
+            for i in 0..audio_io_layout.aux_output_ports.len() {
+                output_scope.elements.push(OutputElement::new(
+                    audio_io_layout.aux_output_name(i).unwrap(),
+                    DEFAULT_SAMPLE_RATE as _,
+                    audio_io_layout.aux_output_ports[i],
+                ));
+            }
+
+            for element in output_scope.elements.iter_mut().skip(1) {
+                element.set_should_allocate(ShouldAllocate::Force);
+            }
         }
 
         let (updated_state_sender, updated_state_receiver) = channel::bounded(0);
@@ -579,88 +585,94 @@ impl<P: AuPlugin> Wrapper<P> {
         let input_scope = self.input_scope.read();
         let output_scope = self.output_scope.read();
 
-        for (i, au_layout) in P::AU_CHANNEL_LAYOUTS.iter().enumerate() {
-            let mut layout_is_valid = true;
+        let init_impl = |audio_io_layout: AudioIOLayout| -> au_sys::OSStatus {
+            let mut plugin = self.plugin.lock();
 
-            for (j, config) in au_layout.iter().enumerate() {
-                if let Some(input_element) = input_scope.element(j as _) {
-                    if config.num_inputs != input_element.num_channels() {
-                        layout_is_valid = false;
-                        break;
-                    }
-                } else if config.num_inputs != 0 {
-                    layout_is_valid = false;
-                    break;
+            *self.audio_io_layout.borrow_mut() = audio_io_layout;
+            let buffer_config = self.buffer_config.borrow();
+            let mut init_context = self.make_init_context();
+
+            let success = plugin.initialize(&audio_io_layout, &buffer_config, &mut init_context);
+            if success {
+                plugin.reset();
+
+                for (_, wrapper_param) in self.param_hash_to_param.iter() {
+                    unsafe {
+                        wrapper_param
+                            .ptr
+                            .update_smoother(buffer_config.sample_rate, true)
+                    };
                 }
 
-                if let Some(output_element) = output_scope.element(j as _) {
-                    if config.num_outputs != output_element.num_channels() {
-                        layout_is_valid = false;
-                        break;
-                    }
-                } else if config.num_outputs != 0 {
-                    layout_is_valid = false;
-                    break;
+                *self.buffer_manager.borrow_mut() = BufferManager::for_audio_io_layout(
+                    buffer_config.max_buffer_size as _,
+                    audio_io_layout,
+                );
+
+                for input_element in input_scope.elements.iter() {
+                    input_element.resize_buffer(buffer_config.max_buffer_size);
                 }
-            }
+                for output_element in output_scope.elements.iter() {
+                    output_element.resize_buffer(buffer_config.max_buffer_size);
+                }
 
-            // TODO: Remove unused elements if there are any?
-            if layout_is_valid {
-                let mut plugin = self.plugin.lock();
-
-                let audio_io_layout = P::AUDIO_IO_LAYOUTS[i];
-                *self.audio_io_layout.borrow_mut() = audio_io_layout;
-                let buffer_config = self.buffer_config.borrow();
-                let mut init_context = self.make_init_context();
-
-                let success =
-                    plugin.initialize(&audio_io_layout, &buffer_config, &mut init_context);
-                if success {
-                    plugin.reset();
-
-                    for (_, wrapper_param) in self.param_hash_to_param.iter() {
-                        unsafe {
-                            wrapper_param
-                                .ptr
-                                .update_smoother(buffer_config.sample_rate, true)
-                        };
-                    }
-
-                    *self.buffer_manager.borrow_mut() = BufferManager::for_audio_io_layout(
-                        buffer_config.max_buffer_size as _,
-                        audio_io_layout,
-                    );
-
+                if let Some(main_sample_rate) = output_scope
+                    .elements
+                    .get(0)
+                    .map(|output_element| output_element.stream_format().mSampleRate)
+                {
                     for input_element in input_scope.elements.iter() {
-                        input_element.resize_buffer(buffer_config.max_buffer_size);
-                    }
-                    for output_element in output_scope.elements.iter() {
-                        output_element.resize_buffer(buffer_config.max_buffer_size);
-                    }
-
-                    if let Some(main_sample_rate) = output_scope
-                        .elements
-                        .get(0)
-                        .map(|output_element| output_element.stream_format().mSampleRate)
-                    {
-                        for input_element in input_scope.elements.iter() {
-                            if !input_element.init_converter(main_sample_rate, false) {
-                                return au_sys::kAudioUnitErr_FailedInitialization;
-                            }
-                        }
-                        for output_element in output_scope.elements.iter().skip(1) {
-                            if !output_element.init_converter(main_sample_rate, true) {
-                                return au_sys::kAudioUnitErr_FailedInitialization;
-                            }
+                        if !input_element.init_converter(main_sample_rate, false) {
+                            return au_sys::kAudioUnitErr_FailedInitialization;
                         }
                     }
-
-                    self.initialized.store(true, Ordering::SeqCst);
-                    return NO_ERROR;
-                } else {
-                    return au_sys::kAudioUnitErr_FailedInitialization;
+                    for output_element in output_scope.elements.iter().skip(1) {
+                        if !output_element.init_converter(main_sample_rate, true) {
+                            return au_sys::kAudioUnitErr_FailedInitialization;
+                        }
+                    }
                 }
-            };
+
+                self.initialized.store(true, Ordering::SeqCst);
+                return NO_ERROR;
+            } else {
+                return au_sys::kAudioUnitErr_FailedInitialization;
+            }
+        };
+
+        if P::AU_CHANNEL_LAYOUTS.is_empty() {
+            return init_impl(AudioIOLayout::default());
+        } else {
+            for (i, au_layout) in P::AU_CHANNEL_LAYOUTS.iter().enumerate() {
+                let mut layout_is_valid = true;
+
+                for (j, config) in au_layout.iter().enumerate() {
+                    if let Some(input_element) = input_scope.element(j as _) {
+                        if config.num_inputs != input_element.num_channels() {
+                            layout_is_valid = false;
+                            break;
+                        }
+                    } else if config.num_inputs != 0 {
+                        layout_is_valid = false;
+                        break;
+                    }
+
+                    if let Some(output_element) = output_scope.element(j as _) {
+                        if config.num_outputs != output_element.num_channels() {
+                            layout_is_valid = false;
+                            break;
+                        }
+                    } else if config.num_outputs != 0 {
+                        layout_is_valid = false;
+                        break;
+                    }
+                }
+
+                // TODO: Remove unused elements if there are any?
+                if layout_is_valid {
+                    return init_impl(P::AUDIO_IO_LAYOUTS[i]);
+                };
+            }
         }
 
         au_sys::kAudioUnitErr_FailedInitialization

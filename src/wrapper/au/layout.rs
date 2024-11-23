@@ -148,6 +148,10 @@ impl<T, const N: usize> ConstVec<T, N> {
         self.len
     }
 
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub const fn as_ptr(&self) -> *const T {
         self.data.as_ptr() as _
     }
