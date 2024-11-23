@@ -122,7 +122,7 @@ au_subtype = "GGVI"
 name = "MIDI Inverter"
 au_manufacturer = "Moist Plugins GmbH"
 au_manufacturer_short = "MPGM"
-au_type = "aumf"  # TODO: Should probably be "aumi" but this is not supported by many hosts
+au_type = "aumi"
 au_subtype = "MIIN"
 
 [poly_mod_synth]
@@ -150,5 +150,5 @@ au_subtype = "STFT"
 name = "SysEx Example"
 au_manufacturer = "Moist Plugins GmbH"
 au_manufacturer_short = "MPGM"
-au_type = "aumf"  # TODO: Should probably be "aumi" but this is not supported by many hosts
+au_type = "aumi"
 au_subtype = "SYEX"
