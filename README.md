@@ -22,11 +22,11 @@ subject to a lot of changes.
 - Parameters are implemented
 - The state of a plugin is preserved
 - Transport information is gathered from the host
+- MIDI input / output + SysEx
+- All plugins pass the validation (auval)
 
 ### Roadmap
 
-- MIDI
-- Pass validation (auval)
 - macOS version restrictions (some features are only available in newer versions)
 - Tests
 - Documentation

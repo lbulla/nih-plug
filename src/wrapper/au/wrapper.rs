@@ -1,5 +1,5 @@
 use atomic_float::AtomicF64;
-use atomic_refcell::AtomicRefCell;
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use crossbeam::atomic::AtomicCell;
 use crossbeam::channel;
 use crossbeam::channel::{Receiver, SendTimeoutError, Sender};
@@ -11,21 +11,25 @@ use objc2_foundation::NSThread;
 use parking_lot::{Mutex, RwLock};
 use std::any::Any;
 use std::collections::hash_map::Keys;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::c_void;
-use std::ptr::null_mut;
+use std::ptr::{null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::event_loop::{BackgroundThread, EventLoop, MainThreadExecutor, TASK_QUEUE_CAPACITY};
+use crate::midi::{MidiConfig, NoteEvent, PluginNoteEvent};
 use crate::params::ParamMut;
 use crate::prelude::{
     AsyncExecutor, AuPlugin, AudioIOLayout, AuxiliaryBuffers, BoolParam, BufferConfig, Editor,
     Param, ParamFlags, ParamPtr, Params, ParentWindowHandle, PluginState, ProcessMode,
     ProcessStatus, SmoothingStyle, TaskExecutor, Transport,
 };
-use crate::wrapper::au::au_types::{AuHostCallbackInfo, AuParamEvent, AuPreset, AudioUnit};
+use crate::wrapper::au::au_types::{
+    AuHostCallbackInfo, AuMidiOutputCallback, AuMidiOutputCallbackBlock,
+    AuMidiOutputCallbackHandler, AuMidiOutputCallbackStruct, AuParamEvent, AuPreset, AudioUnit,
+};
 use crate::wrapper::au::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use crate::wrapper::au::editor::WrapperViewHolder;
 use crate::wrapper::au::properties::{PropertyDispatcher, PropertyDispatcherImpl};
@@ -35,14 +39,18 @@ use crate::wrapper::au::scope::{
 use crate::wrapper::au::util::ThreadWrapper;
 use crate::wrapper::au::{au_sys, AuPropertyListenerProc, AuRenderCallback, NO_ERROR};
 use crate::wrapper::state;
-use crate::wrapper::util::buffer_management::BufferManager;
+use crate::wrapper::util::buffer_management::{BufferManager, Buffers};
 use crate::wrapper::util::hash_param_id;
 
-// ---------- Constants ---------- //
+// ---------- Constants / Types ---------- //
 
 const DEFAULT_BUFFER_SIZE: u32 = 512;
 const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
 const DEFAULT_LAST_RENDER_SAMPLE_TIME: au_sys::Float64 = -1.0;
+
+const EVENT_CAPACITY: usize = 512;
+
+pub(super) type EventRef<'a, P> = AtomicRefMut<'a, VecDeque<PluginNoteEvent<P>>>;
 
 // ---------- Listener / Notifies ---------- //
 
@@ -281,6 +289,10 @@ pub(super) struct Wrapper<P: AuPlugin> {
     pub(super) input_scope: RwLock<IoScope<InputElement>>,
     pub(super) output_scope: RwLock<IoScope<OutputElement>>,
 
+    input_events: AtomicRefCell<VecDeque<PluginNoteEvent<P>>>,
+    output_events: AtomicRefCell<VecDeque<PluginNoteEvent<P>>>,
+    midi_output_callback: AtomicRefCell<Option<AuMidiOutputCallback>>,
+
     tail_seconds: AtomicCell<au_sys::Float64>,
     last_render_error: AtomicCell<au_sys::OSStatus>,
     last_render_sample_time: AtomicF64,
@@ -446,6 +458,10 @@ impl<P: AuPlugin> Wrapper<P> {
 
             input_scope: RwLock::new(input_scope),
             output_scope: RwLock::new(output_scope),
+            midi_output_callback: AtomicRefCell::new(None),
+
+            input_events: AtomicRefCell::new(VecDeque::with_capacity(EVENT_CAPACITY)),
+            output_events: AtomicRefCell::new(VecDeque::with_capacity(EVENT_CAPACITY)),
 
             tail_seconds: AtomicCell::new(0.0),
             last_render_error: AtomicCell::new(NO_ERROR),
@@ -1109,6 +1125,123 @@ impl<P: AuPlugin> Wrapper<P> {
         NO_ERROR
     }
 
+    // ---------- MIDI ---------- //
+
+    pub(super) fn set_midi_output_callback_block(&self, block: au_sys::AUMIDIEventListBlock) {
+        *self.midi_output_callback.borrow_mut() = Some(AuMidiOutputCallback::Block(
+            AuMidiOutputCallbackBlock::new(block),
+        ));
+    }
+
+    pub(super) fn set_midi_output_callback_struct(
+        &self,
+        struct_: au_sys::AUMIDIOutputCallbackStruct,
+    ) {
+        let mut midi_output_callback = self.midi_output_callback.borrow_mut();
+        if let Some(midi_output_callback) = midi_output_callback.as_ref() {
+            match midi_output_callback {
+                // NOTE: Prefer the block because the struct is deprecated.
+                AuMidiOutputCallback::Block(_) => {
+                    return;
+                }
+                _ => (),
+            }
+        }
+        *midi_output_callback = Some(AuMidiOutputCallback::Struct(
+            AuMidiOutputCallbackStruct::new(struct_),
+        ));
+    }
+
+    unsafe fn handle_midi_output(&self, audio_time_stamp: *const au_sys::AudioTimeStamp) {
+        let output_events = self.output_events.borrow_mut();
+        if output_events.is_empty() {
+            return;
+        }
+
+        if let Some(midi_output_callback) = self.midi_output_callback.borrow().as_ref() {
+            match midi_output_callback {
+                AuMidiOutputCallback::Block(block) => {
+                    block.handle_events::<P>(audio_time_stamp, output_events);
+                }
+                AuMidiOutputCallback::Struct(struct_) => {
+                    struct_.handle_events::<P>(audio_time_stamp, output_events);
+                }
+            }
+        }
+    }
+
+    pub(super) fn midi_event_impl(
+        &self,
+        input_events: &mut EventRef<P>,
+        data: &[u8],
+        in_offset_sample_frame: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        match NoteEvent::<P::SysExMessage>::from_midi(in_offset_sample_frame, data) {
+            Ok(
+                note_event @ (NoteEvent::NoteOn { .. }
+                | NoteEvent::NoteOff { .. }
+                | NoteEvent::PolyPressure { .. }),
+            ) if P::MIDI_INPUT >= MidiConfig::Basic => {
+                input_events.push_back(note_event);
+            }
+            Ok(note_event) if P::MIDI_INPUT >= MidiConfig::MidiCCs => {
+                input_events.push_back(note_event);
+            }
+            Ok(_) => (),
+            Err(n) => nih_debug_assert_failure!("Unhandled MIDI message type {}", n),
+        };
+        NO_ERROR
+    }
+
+    pub(super) fn midi_event(
+        &self,
+        in_status: au_sys::UInt32,
+        in_data1: au_sys::UInt32,
+        in_data2: au_sys::UInt32,
+        in_offset_sample_frame: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let mut input_events = self.input_events.borrow_mut();
+        self.midi_event_impl(
+            &mut input_events,
+            &[in_status as _, in_data1 as _, in_data2 as _],
+            in_offset_sample_frame,
+        )
+    }
+
+    pub(super) fn sys_ex(
+        &self,
+        in_data: *const au_sys::UInt8,
+        in_length: au_sys::UInt32,
+    ) -> au_sys::OSStatus {
+        let mut input_events = self.input_events.borrow_mut();
+        let data = unsafe { &*slice_from_raw_parts(in_data, in_length as _) };
+        self.midi_event_impl(&mut input_events, data, 0)
+    }
+
+    // NOTE: See `AuMidiOutputCallbackBlock` for information regarding the list format.
+    pub(super) fn midi_event_list(
+        &self,
+        in_offset_sample_frame: au_sys::UInt32,
+        in_event_list: *const au_sys::MIDIEventList,
+    ) -> au_sys::OSStatus {
+        let mut input_events = self.input_events.borrow_mut();
+        unsafe {
+            let in_event_list = &*in_event_list;
+            for i in 0..in_event_list.numPackets {
+                let packet = &*in_event_list.packet.as_ptr().add(i as _);
+                for j in 0..packet.wordCount {
+                    let midi = au_sys::UInt32::to_be_bytes(packet.words[j as usize]);
+                    self.midi_event_impl(
+                        &mut input_events,
+                        &[midi[1], midi[2], midi[3]],
+                        in_offset_sample_frame,
+                    );
+                }
+            }
+        }
+        NO_ERROR
+    }
+
     // ---------- Render ---------- //
 
     pub(super) fn add_render_notify(
@@ -1275,6 +1408,8 @@ impl<P: AuPlugin> Wrapper<P> {
         WrapperProcessContext {
             wrapper: self,
             transport,
+            input_events_guard: self.input_events.borrow_mut(),
+            output_events_guard: self.output_events.borrow_mut(),
         }
     }
 
@@ -1289,6 +1424,40 @@ impl<P: AuPlugin> Wrapper<P> {
         NO_ERROR
     }
 
+    fn process_plugin<'a>(
+        &self,
+        buffers: Buffers<'a, 'a>,
+        context: &mut WrapperProcessContext<P>,
+        sample_rate: f32,
+    ) {
+        let mut aux = AuxiliaryBuffers {
+            inputs: buffers.aux_inputs,
+            outputs: buffers.aux_outputs,
+        };
+
+        let process_status = self
+            .plugin
+            .lock()
+            .process(buffers.main_buffer, &mut aux, context);
+        match process_status {
+            ProcessStatus::Error(err) => {
+                nih_debug_assert_failure!("Process error: {}", err);
+                // TODO: What OSStatus?
+                self.tail_seconds.store(0.0);
+            }
+            ProcessStatus::Normal => {
+                self.tail_seconds.store(0.0);
+            }
+            ProcessStatus::Tail(tail) => {
+                self.tail_seconds
+                    .store(tail as au_sys::Float64 / sample_rate as au_sys::Float64);
+            }
+            ProcessStatus::KeepAlive => {
+                self.tail_seconds.store(au_sys::Float64::MAX);
+            }
+        }
+    }
+
     pub(super) unsafe fn render_impl(
         &self,
         io_action_flags: *mut au_sys::AudioUnitRenderActionFlags,
@@ -1297,184 +1466,178 @@ impl<P: AuPlugin> Wrapper<P> {
         in_number_frames: au_sys::UInt32,
         io_data: *mut au_sys::AudioBufferList,
     ) -> au_sys::OSStatus {
-        let output_scope = self.output_scope.read();
-        if let Some(current_output_element) = output_scope.element(in_output_bus_num) {
-            if (*io_data).mBuffers[0].mData.is_null()
-                || current_output_element.should_allocate() != ShouldAllocate::False
-            {
-                current_output_element.prepare_buffer_list(in_number_frames);
-            } else {
-                current_output_element.copy_buffer_list_from(io_data);
-            }
+        if P::AUDIO_IO_LAYOUTS.is_empty() && P::MIDI_OUTPUT != MidiConfig::None {
+            let sample_rate = self.sample_rate();
+            let mut context = self.make_process_context(sample_rate);
 
-            // TODO: Is this really stable in all cases?
-            // NOTE: All output elements are rendered in one go.
-            //       Therefore, we just copy the buffer when `mSampleTime` is the same.
-            if self.last_render_sample_time() != (*in_time_stamp).mSampleTime {
-                let input_scope = self.input_scope.read();
-                let mut buffer_is_valid = true;
+            let mut buffer_manager = self.buffer_manager.borrow_mut();
+            let buffers = buffer_manager.create_buffers(0, 0, |_| {});
 
-                for (i, input_element) in input_scope.elements.iter().enumerate() {
-                    if input_element.pull_input(
-                        io_action_flags,
-                        in_time_stamp,
-                        i as _,
-                        in_number_frames,
-                    ) != NO_ERROR
-                    {
-                        buffer_is_valid = false;
-                        break;
-                    }
+            self.process_plugin(buffers, &mut context, sample_rate);
+        } else {
+            let output_scope = self.output_scope.read();
+
+            if let Some(current_output_element) = output_scope.element(in_output_bus_num) {
+                if (*io_data).mBuffers[0].mData.is_null()
+                    || current_output_element.should_allocate() != ShouldAllocate::False
+                {
+                    current_output_element.prepare_buffer_list(in_number_frames);
+                } else {
+                    current_output_element.copy_buffer_list_from(io_data);
                 }
 
-                if buffer_is_valid {
-                    for (i, output_element) in output_scope.elements.iter().enumerate() {
-                        if i as au_sys::UInt32 != in_output_bus_num {
-                            output_element.prepare_buffer_list(in_number_frames);
+                // TODO: Is this really stable in all cases?
+                // NOTE: All output elements are rendered in one go.
+                //       Therefore, we just copy the buffer when `mSampleTime` is the same.
+                if self.last_render_sample_time() != (*in_time_stamp).mSampleTime {
+                    let input_scope = self.input_scope.read();
+                    let mut buffer_is_valid = true;
+
+                    for (i, input_element) in input_scope.elements.iter().enumerate() {
+                        if input_element.pull_input(
+                            io_action_flags,
+                            in_time_stamp,
+                            i as _,
+                            in_number_frames,
+                        ) != NO_ERROR
+                        {
+                            buffer_is_valid = false;
+                            break;
                         }
                     }
 
-                    let mut buffer_manager = self.buffer_manager.borrow_mut();
-                    let sample_rate = self.sample_rate();
-                    let mut context = self.make_process_context(sample_rate);
-
-                    let mut process = |block_start: u32, block_length: u32| {
-                        let buffers = buffer_manager.create_buffers(
-                            block_start as _,
-                            block_length as _,
-                            |buffer_source| {
-                                for (i, input_element) in input_scope.elements.iter().enumerate() {
-                                    let pointers = if i == 0 {
-                                        &mut buffer_source.main_input_channel_pointers
-                                    } else {
-                                        &mut buffer_source.aux_input_channel_pointers[i - 1]
-                                    };
-                                    *pointers = input_element.create_channel_pointers();
-                                }
-
-                                for (i, output_element) in output_scope.elements.iter().enumerate()
-                                {
-                                    let pointers = if i == 0 {
-                                        &mut buffer_source.main_output_channel_pointers
-                                    } else {
-                                        &mut buffer_source.aux_output_channel_pointers[i - 1]
-                                    };
-                                    *pointers = output_element.create_channel_pointers();
-                                }
-                            },
-                        );
-
-                        let mut aux = AuxiliaryBuffers {
-                            inputs: buffers.aux_inputs,
-                            outputs: buffers.aux_outputs,
-                        };
-
-                        let process_status =
-                            self.plugin
-                                .lock()
-                                .process(buffers.main_buffer, &mut aux, &mut context);
-                        match process_status {
-                            ProcessStatus::Error(err) => {
-                                nih_debug_assert_failure!("Process error: {}", err);
-                                // TODO: What OSStatus?
-                                self.tail_seconds.store(0.0);
-                            }
-                            ProcessStatus::Normal => {
-                                self.tail_seconds.store(0.0);
-                            }
-                            ProcessStatus::Tail(tail) => {
-                                self.tail_seconds.store(
-                                    tail as au_sys::Float64 / sample_rate as au_sys::Float64,
-                                );
-                            }
-                            ProcessStatus::KeepAlive => {
-                                self.tail_seconds.store(au_sys::Float64::MAX);
+                    if buffer_is_valid {
+                        for (i, output_element) in output_scope.elements.iter().enumerate() {
+                            if i as au_sys::UInt32 != in_output_bus_num {
+                                output_element.prepare_buffer_list(in_number_frames);
                             }
                         }
-                    };
 
-                    if P::SAMPLE_ACCURATE_AUTOMATION {
-                        let mut scheduled_params = self.scheduled_params.borrow_mut();
+                        let sample_rate = self.sample_rate();
+                        let mut context = self.make_process_context(sample_rate);
+                        let mut buffer_manager = self.buffer_manager.borrow_mut();
 
-                        let mut block_start = 0u32;
-                        for (block_end, param_events) in scheduled_params.iter_mut() {
-                            if *block_end >= in_number_frames {
-                                break;
-                            }
+                        let mut create_buffers_and_process =
+                            |block_start: u32, block_length: u32| {
+                                let buffers = buffer_manager.create_buffers(
+                                    block_start as _,
+                                    block_length as _,
+                                    |buffer_source| {
+                                        for (i, input_element) in
+                                            input_scope.elements.iter().enumerate()
+                                        {
+                                            let pointers = if i == 0 {
+                                                &mut buffer_source.main_input_channel_pointers
+                                            } else {
+                                                &mut buffer_source.aux_input_channel_pointers[i - 1]
+                                            };
+                                            *pointers = input_element.create_channel_pointers();
+                                        }
 
-                            let block_length = block_end - block_start;
-                            if block_length > 0 {
-                                process(block_start, block_length);
-                            }
+                                        for (i, output_element) in
+                                            output_scope.elements.iter().enumerate()
+                                        {
+                                            let pointers = if i == 0 {
+                                                &mut buffer_source.main_output_channel_pointers
+                                            } else {
+                                                &mut buffer_source.aux_output_channel_pointers
+                                                    [i - 1]
+                                            };
+                                            *pointers = output_element.create_channel_pointers();
+                                        }
+                                    },
+                                );
 
-                            for param_event in param_events.iter_mut() {
-                                match param_event {
-                                    ScheduledParamEvent::Immediate(immediate) => {
-                                        let param_changed = self.set_param_impl(
-                                            immediate.param_hash,
-                                            immediate.param,
-                                            immediate.value,
-                                            false,
-                                            sample_rate,
-                                            false,
-                                        );
-                                        if param_changed {
+                                self.process_plugin(buffers, &mut context, sample_rate);
+                            };
+
+                        if P::SAMPLE_ACCURATE_AUTOMATION {
+                            let mut scheduled_params = self.scheduled_params.borrow_mut();
+
+                            let mut block_start = 0u32;
+                            for (block_end, param_events) in scheduled_params.iter_mut() {
+                                if *block_end >= in_number_frames {
+                                    break;
+                                }
+
+                                let block_length = block_end - block_start;
+                                if block_length > 0 {
+                                    create_buffers_and_process(block_start, block_length);
+                                }
+
+                                for param_event in param_events.iter_mut() {
+                                    match param_event {
+                                        ScheduledParamEvent::Immediate(immediate) => {
+                                            let param_changed = self.set_param_impl(
+                                                immediate.param_hash,
+                                                immediate.param,
+                                                immediate.value,
+                                                false,
+                                                sample_rate,
+                                                false,
+                                            );
+                                            if param_changed {
+                                                self.post_editor_param_event(
+                                                    EditorParamEvent::NotifyEditor {
+                                                        param_hash: immediate.param_hash,
+                                                        normalized_value: immediate
+                                                            .param
+                                                            .unmodulated_normalized_value(),
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        ScheduledParamEvent::Ramp(ramp) => {
+                                            let normalized_value = ramp.init(sample_rate);
                                             self.post_editor_param_event(
                                                 EditorParamEvent::NotifyEditor {
-                                                    param_hash: immediate.param_hash,
-                                                    normalized_value: immediate
-                                                        .param
-                                                        .unmodulated_normalized_value(),
+                                                    param_hash: ramp.param_hash,
+                                                    normalized_value,
                                                 },
                                             );
                                         }
                                     }
-                                    ScheduledParamEvent::Ramp(ramp) => {
-                                        let normalized_value = ramp.init(sample_rate);
-                                        self.post_editor_param_event(
-                                            EditorParamEvent::NotifyEditor {
-                                                param_hash: ramp.param_hash,
-                                                normalized_value,
-                                            },
-                                        );
-                                    }
                                 }
+
+                                block_start = *block_end;
                             }
 
-                            block_start = *block_end;
-                        }
+                            if block_start < in_number_frames {
+                                create_buffers_and_process(
+                                    block_start,
+                                    in_number_frames - block_start,
+                                );
+                            }
 
-                        if block_start < in_number_frames {
-                            process(block_start, in_number_frames - block_start);
+                            scheduled_params.clear();
+                        } else {
+                            nih_debug_assert!(
+                                self.scheduled_params.borrow().is_empty(),
+                                "`scheduled_params` must only be used when sample accurate \
+                                 automation is enabled"
+                            );
+                            create_buffers_and_process(0, in_number_frames);
                         }
-
-                        scheduled_params.clear();
-                    } else {
-                        nih_debug_assert!(
-                            self.scheduled_params.borrow().is_empty(),
-                            "`scheduled_params` must only be used when sample accurate automation \
-                             is enabled"
-                        );
-                        process(0, in_number_frames);
                     }
+
+                    self.last_render_sample_time
+                        .store((*in_time_stamp).mSampleTime, Ordering::SeqCst);
                 }
 
-                self.last_render_sample_time
-                    .store((*in_time_stamp).mSampleTime, Ordering::SeqCst);
-            }
-
-            if (*io_data).mBuffers[0].mData.is_null() {
-                current_output_element.convert_buffer();
-                current_output_element.copy_buffer_list_to(io_data);
+                if (*io_data).mBuffers[0].mData.is_null() {
+                    current_output_element.convert_buffer();
+                    current_output_element.copy_buffer_list_to(io_data);
+                } else {
+                    current_output_element.convert_buffer();
+                    current_output_element.copy_buffer_to(io_data);
+                }
             } else {
-                current_output_element.convert_buffer();
-                current_output_element.copy_buffer_to(io_data);
+                return au_sys::kAudioUnitErr_InvalidElement;
             }
-
-            NO_ERROR
-        } else {
-            au_sys::kAudioUnitErr_InvalidElement
         }
+
+        self.handle_midi_output(in_time_stamp);
+        NO_ERROR
     }
 
     pub(super) unsafe fn render(
