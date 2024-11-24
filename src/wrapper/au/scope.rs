@@ -339,7 +339,6 @@ impl IoElement {
 
 // ---------- IoElementImpl ---------- //
 
-// TODO: Remove unused functions when they are not needed for sure.
 // NOTE: Some boilerplate for not having to type `base()` / `base_mut()` all the time.
 pub(super) trait IoElementImpl {
     // ---------- Base ---------- //
@@ -349,41 +348,12 @@ pub(super) trait IoElementImpl {
 
     // ---------- Properties ---------- //
 
-    fn name(&self) -> au_sys::CFStringRef {
-        self.base().name()
-    }
-
-    fn sample_rate(&self) -> au_sys::Float64 {
-        self.base().sample_rate()
-    }
-
-    fn set_sample_rate(&mut self, sample_rate: au_sys::Float64) {
-        self.base_mut().set_sample_rate(sample_rate)
-    }
-
     fn num_channels(&self) -> au_sys::UInt32 {
         self.base().num_channels()
     }
 
     fn stream_format(&self) -> &au_sys::AudioStreamBasicDescription {
         self.base().stream_format()
-    }
-
-    fn set_stream_format(
-        &mut self,
-        stream_format: &au_sys::AudioStreamBasicDescription,
-        buffer_size: u32,
-    ) {
-        self.base_mut()
-            .set_stream_format(stream_format, buffer_size)
-    }
-
-    fn layout(&self, layout: &mut au_sys::AudioChannelLayout) {
-        self.base().layout(layout);
-    }
-
-    fn set_layout(&mut self, layout: &au_sys::AudioChannelLayout, buffer_size: u32) {
-        self.base_mut().set_layout(layout, buffer_size);
     }
 
     fn should_allocate(&self) -> ShouldAllocate {
@@ -406,10 +376,6 @@ pub(super) trait IoElementImpl {
 
     fn prepare_buffer_list(&self, num_samples: u32) {
         self.base().prepare_buffer_list(num_samples);
-    }
-
-    fn prepare_buffer_list_null(&self, num_samples: u32) {
-        self.base().prepare_buffer_list_null(num_samples);
     }
 
     fn create_channel_pointers(&self) -> Option<ChannelPointers> {
