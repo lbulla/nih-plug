@@ -33,29 +33,15 @@ unsafe impl<T: Clone> Sync for ThreadWrapper<T> {}
 
 // ---------- Strings ---------- //
 
-// TODO: Remove unused functions when they are not needed for sure.
 pub(super) struct CFString(au_sys::CFStringRef);
 
 impl CFString {
-    pub(super) fn new(string: au_sys::CFStringRef) -> Self {
-        Self(string)
-    }
-
     pub(super) fn from_str(string: &str) -> Self {
         Self(str_to_CFStringRef(string))
     }
 
     pub(super) fn get(&self) -> au_sys::CFStringRef {
         self.0
-    }
-
-    pub(super) fn set(&mut self, value: au_sys::CFStringRef) {
-        self.release();
-        self.0 = value;
-    }
-
-    pub(super) fn set_str(&mut self, string: &str) {
-        self.set(str_to_CFStringRef(string));
     }
 
     fn release(&mut self) {
