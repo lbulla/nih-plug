@@ -13,7 +13,7 @@ use std::any::Any;
 use std::collections::hash_map::Keys;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::c_void;
-use std::ptr::{null_mut, slice_from_raw_parts};
+use std::ptr::{fn_addr_eq, null_mut, slice_from_raw_parts};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -821,8 +821,9 @@ impl<P: AuPlugin> Wrapper<P> {
         in_proc_data: *mut c_void,
     ) -> au_sys::OSStatus {
         if let Some(listeners) = self.property_listeners.borrow_mut().get_mut(&in_id) {
-            listeners
-                .retain(|listener| listener.proc != in_proc && listener.data.get() != in_proc_data);
+            listeners.retain(|listener| {
+                !fn_addr_eq(listener.proc, in_proc) && listener.data.get() != in_proc_data
+            });
         }
         NO_ERROR
     }
@@ -1264,7 +1265,7 @@ impl<P: AuPlugin> Wrapper<P> {
         self.render_notifies
             .borrow_mut()
             .0
-            .retain(|notify| notify.proc != in_proc && notify.data != in_proc_data);
+            .retain(|notify| !fn_addr_eq(notify.proc, in_proc) && notify.data != in_proc_data);
         NO_ERROR
     }
 
