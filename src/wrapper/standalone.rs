@@ -47,14 +47,16 @@ mod wrapper;
 ///
 /// If the wrapped plugin fails to initialize or throws an error during audio processing, then this
 /// function will return `false`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn nih_export_standalone<P: Plugin>() -> bool {
     // TODO: If the backend fails to initialize then the standalones will exit normally instead of
     //       with an error code. This should probably be changed.
-    nih_export_standalone_with_args::<P, _>(std::env::args())
+    return nih_export_standalone_with_args::<P, _>(std::env::args());
 }
 
 /// The same as [`nih_export_standalone()`], but with the arguments taken from an iterator instead
 /// of using [`std::env::args()`].
+#[cfg(not(target_arch = "wasm32"))]
 pub fn nih_export_standalone_with_args<P: Plugin, Args: IntoIterator<Item = String>>(
     args: Args,
 ) -> bool {
@@ -63,13 +65,7 @@ pub fn nih_export_standalone_with_args<P: Plugin, Args: IntoIterator<Item = Stri
     // Instead of parsing this directly, we need to take a bit of a roundabout approach to get the
     // plugin's name and vendor in here since they'd otherwise be taken from NIH-plug's own
     // `Cargo.toml` file.
-    let config = WrapperConfig::from_arg_matches(
-        &WrapperConfig::command()
-            .name(P::NAME)
-            .author(P::VENDOR)
-            .get_matches_from(args),
-    )
-    .unwrap_or_else(|err| err.exit());
+    let config = load_config_from_args::<P, Args>(args);
 
     match config.backend {
         config::BackendType::Auto => {
@@ -175,6 +171,86 @@ pub fn nih_export_standalone_with_args<P: Plugin, Args: IntoIterator<Item = Stri
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn nih_export_standalone<P: Plugin>() {
+    nih_export_standalone_with_args::<P, Vec<_>>(None);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn nih_export_standalone_with_args<P: Plugin, Args: IntoIterator<Item = String> + 'static>(
+    args: Option<Args>,
+) {
+    setup_logger();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let config = load_config::<P, _>(args);
+
+        match config.backend {
+            config::BackendType::Auto => {
+                match backend::CpalMidir::new::<P>(config.clone(), cpal::HostId::WebAudio).await {
+                    Ok(backend) => {
+                        nih_log!("Using the WebAudio backend");
+                        run_wrapper::<P, _>(backend, config.clone()).await;
+                    }
+                    Err(err) => {
+                        nih_error!(
+                            "Could not initialize the WebAudio backends, falling back to the \
+                             dummy audio backend: {err:#}"
+                        );
+
+                        nih_error!(
+                            "Falling back to the dummy audio backend, audio and MIDI will not work"
+                        );
+                        run_wrapper::<P, _>(backend::Dummy::new::<P>(config.clone()), config).await;
+                    }
+                }
+            }
+            config::BackendType::WebAudio => {
+                match backend::CpalMidir::new::<P>(config.clone(), cpal::HostId::WebAudio).await {
+                    Ok(backend) => {
+                        run_wrapper::<P, _>(backend, config).await;
+                    }
+                    Err(err) => {
+                        nih_error!("Could not initialize the WebAudio backend: {:#}", err);
+                    }
+                }
+            }
+            config::BackendType::Dummy => {
+                run_wrapper::<P, _>(backend::Dummy::new::<P>(config.clone()), config).await;
+            }
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_config<P: Plugin, Args: IntoIterator<Item = String>>(args: Option<Args>) -> WrapperConfig {
+    if let Some(args) = args {
+        load_config_from_args::<P, _>(args)
+    } else {
+        let config_string = js_sys::Reflect::get(&js_sys::global(), &"config".into()).unwrap();
+        if let Some(config_string) = config_string.as_string() {
+            if let Ok(config) = serde_json::from_str(&config_string) {
+                return config;
+            }
+        }
+
+        load_config_from_args::<P, _>(vec![])
+    }
+}
+
+fn load_config_from_args<P: Plugin, Args: IntoIterator<Item = String>>(
+    args: Args,
+) -> WrapperConfig {
+    WrapperConfig::from_arg_matches(
+        &WrapperConfig::command()
+            .name(P::NAME)
+            .author(P::VENDOR)
+            .get_matches_from(args),
+    )
+    .unwrap_or_else(|err| err.exit())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn run_wrapper<P: Plugin, B: Backend<P>>(backend: B, config: WrapperConfig) -> bool {
     let wrapper = match Wrapper::<P, _>::new(backend, config) {
         Ok(wrapper) => wrapper,
@@ -191,6 +267,22 @@ fn run_wrapper<P: Plugin, B: Backend<P>>(backend: B, config: WrapperConfig) -> b
             print_error(err);
             false
         }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_wrapper<P: Plugin, B: Backend<P>>(backend: B, config: WrapperConfig) {
+    let wrapper = match Wrapper::<P, _>::new(backend, config) {
+        Ok(wrapper) => wrapper,
+        Err(err) => {
+            print_error(err);
+            return;
+        }
+    };
+
+    match wrapper.run().await {
+        Ok(()) => (),
+        Err(err) => print_error(err),
     }
 }
 

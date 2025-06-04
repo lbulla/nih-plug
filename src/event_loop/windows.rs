@@ -6,7 +6,7 @@ use std::ffi::{c_void, CString};
 use std::mem;
 use std::ptr;
 use std::sync::Weak;
-use std::thread::{self, ThreadId};
+use wasm_thread::ThreadId;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::{

@@ -31,6 +31,7 @@ macro_rules! param_ptr_forward(
         ///
         /// Calling this function is only safe as long as the object this [`ParamPtr`] was created
         /// for is still alive.
+        #[allow(unused)] // `modulate_value` is only used for clap atm.
         $vis unsafe fn $method(&self $(, $arg_name: $arg_ty)*) $(-> $ret)? {
             match self {
                 ParamPtr::FloatParam(p) => (**p).$method($($arg_name),*),
@@ -49,6 +50,7 @@ macro_rules! param_ptr_forward(
         ///
         /// Calling this function is only safe as long as the object this [`ParamPtr`] was created
         /// for is still alive.
+        #[allow(unused)] // `modulate_value` is only used for clap atm.
         $vis unsafe fn $method(&mut self $(, $arg_name: $arg_ty)*) $(-> $ret)? {
             match self {
                 ParamPtr::FloatParam(p) => (**p).$method($($arg_name),*),

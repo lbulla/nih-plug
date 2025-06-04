@@ -22,9 +22,6 @@ use clap_sys::ext::audio_ports::{
 use clap_sys::ext::audio_ports_config::{
     clap_audio_ports_config, clap_plugin_audio_ports_config, CLAP_EXT_AUDIO_PORTS_CONFIG,
 };
-use clap_sys::ext::remote_controls::{
-    clap_plugin_remote_controls, clap_remote_controls_page, CLAP_EXT_REMOTE_CONTROLS,
-};
 use clap_sys::ext::gui::{
     clap_gui_resize_hints, clap_host_gui, clap_plugin_gui, clap_window, CLAP_EXT_GUI,
     CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11,
@@ -39,6 +36,9 @@ use clap_sys::ext::params::{
     CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS, CLAP_PARAM_IS_HIDDEN,
     CLAP_PARAM_IS_MODULATABLE, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY,
     CLAP_PARAM_IS_STEPPED, CLAP_PARAM_RESCAN_VALUES,
+};
+use clap_sys::ext::remote_controls::{
+    clap_plugin_remote_controls, clap_remote_controls_page, CLAP_EXT_REMOTE_CONTROLS,
 };
 use clap_sys::ext::render::{
     clap_plugin_render, clap_plugin_render_mode, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE,
@@ -74,8 +74,8 @@ use std::os::raw::c_char;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
-use std::thread::{self, ThreadId};
 use std::time::Duration;
+use wasm_thread::ThreadId;
 
 use super::context::{WrapperGuiContext, WrapperInitContext, WrapperProcessContext};
 use super::descriptor::PluginDescriptor;
@@ -352,7 +352,7 @@ impl<P: ClapPlugin> EventLoop<Task<P>, Wrapper<P>> for Wrapper<P> {
             }
             // FIXME: `thread::current()` may allocate the first time it's called, is there a safe
             //        non-allocating version of this without using huge OS-specific libraries?
-            None => permit_alloc(|| thread::current().id() == self.main_thread_id),
+            None => permit_alloc(|| wasm_thread::current().id() == self.main_thread_id),
         }
     }
 }
@@ -682,7 +682,7 @@ impl<P: ClapPlugin> Wrapper<P> {
             ),
 
             tasks: ArrayQueue::new(TASK_QUEUE_CAPACITY),
-            main_thread_id: thread::current().id(),
+            main_thread_id: wasm_thread::current().id(),
             // Initialized later as it needs a reference to the wrapper for the executor
             background_thread: AtomicRefCell::new(None),
         };

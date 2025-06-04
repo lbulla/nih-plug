@@ -1,12 +1,12 @@
 use atomic_refcell::AtomicRefCell;
+use instant::{Duration, Instant};
 use nih_plug::prelude::{AtomicF32, Editor, GuiContext, Param};
 use nih_plug::{nih_error, util};
 use nih_plug_slint::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use crate::GainParams;
+use crate::gain::GainParams;
 
 slint::include_modules!();
 

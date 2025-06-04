@@ -10,6 +10,7 @@ use crate::prelude::{
 
 #[cfg(all(feature = "au", target_os = "macos"))]
 pub mod au;
+#[cfg(feature = "clap")]
 pub mod clap;
 #[cfg(feature = "vst3")]
 pub mod vst3;

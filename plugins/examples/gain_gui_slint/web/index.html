@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Gain GUI (Slint)</title>
+</head>
+<body>
+    <!--The play button is mandatory because autoplaying audio is not allowed.-->
+    <div id="start-div">
+        <div id="settings-div">
+            <div id="cookie-div">
+                <label id="cookie-label" for="cookie-checkbox">Cookies</label>
+                <input type="checkbox" id="cookie-checkbox" onclick="setUseCookies(this)"/>
+            </div>
+            <div id="config-div">
+                <label id="config-label" for="config-file">Config</label>
+                <input type="file" id="config-file" accept=".json"/>
+            </div>
+        </div>
+        <button id="play-button" onclick="play()">Play</button>
+    </div>
+    <div id="canvas-div">
+        <canvas id="canvas" data-raw-handle="0"></canvas>
+    </div>
+</body>
+<link rel="stylesheet" href="style.css"/>
+<script src="coi-serviceworker.js"></script>
+<script src="main.js"></script>
+</html>

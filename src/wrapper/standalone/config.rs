@@ -1,10 +1,11 @@
 use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 
 use crate::prelude::{AudioIOLayout, Plugin};
 
 /// Configuration for a standalone plugin that would normally be provided by the DAW.
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 #[clap(about = None, long_about = None)]
 pub struct WrapperConfig {
     /// The audio and MIDI backend to use.
@@ -96,13 +97,14 @@ pub struct WrapperConfig {
 }
 
 /// Determines which audio and MIDI backend should be used.
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, ValueEnum, Serialize, Deserialize)]
 pub enum BackendType {
     /// Automatically pick the backend depending on what's available.
     ///
     /// This defaults to JACK if JACK is available, and falls back to the dummy backend if not.
     Auto,
     /// Use JACK for audio and MIDI.
+    #[cfg(not(target_arch = "wasm32"))]
     Jack,
     /// Use ALSA for audio and MIDI.
     #[cfg(target_os = "linux")]
@@ -113,6 +115,8 @@ pub enum BackendType {
     /// Use WASAPI for audio and MIDI.
     #[cfg(target_os = "windows")]
     Wasapi,
+    #[cfg(target_arch = "wasm32")]
+    WebAudio,
     /// Does not playback or receive any audio or MIDI.
     Dummy,
 }

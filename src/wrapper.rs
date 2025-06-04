@@ -1,6 +1,7 @@
 //! Wrappers for different plugin types. Each wrapper has an entry point macro that you can pass the
 //! name of a type that implements `Plugin` to. The macro will handle the rest.
 
+#[cfg(feature = "clap")]
 pub mod clap;
 pub mod state;
 pub(crate) mod util;

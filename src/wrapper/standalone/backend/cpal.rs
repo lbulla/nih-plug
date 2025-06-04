@@ -1,27 +1,44 @@
 use anyhow::{Context, Result};
 use cpal::{
-    traits::*, Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat,
-    Stream, StreamConfig,
+    traits::*, Device, DevicesError, FromSample, Host, InputCallbackInfo, OutputCallbackInfo,
+    Sample, SampleFormat, Stream, StreamConfig,
 };
-use crossbeam::sync::{Parker, Unparker};
 use midir::{
     MidiInput, MidiInputConnection, MidiInputPort, MidiOutput, MidiOutputConnection, MidiOutputPort,
 };
 use parking_lot::Mutex;
 use rtrb::RingBuffer;
-use std::borrow::Borrow;
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
-use std::thread::ScopedJoinHandle;
 
 use super::super::config::WrapperConfig;
 use super::Backend;
-use crate::midi::MidiResult;
 use crate::prelude::{
     AudioIOLayout, AuxiliaryBuffers, Buffer, MidiConfig, NoteEvent, Plugin, PluginNoteEvent,
     Transport,
 };
 use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    pub(super) use crate::midi::MidiResult;
+    pub(super) use crossbeam::channel::Sender;
+    pub(super) use crossbeam::sync::{Parker, Unparker};
+    pub(super) use std::borrow::Borrow;
+    pub(super) use wasm_thread::ScopedJoinHandle;
+}
+#[cfg(not(target_arch = "wasm32"))]
+use native::*;
+
+#[cfg(target_arch = "wasm32")]
+mod web {
+    pub(super) use async_channel::Sender;
+    pub(super) use std::sync::atomic::{AtomicBool, Ordering};
+    pub(super) use std::sync::Arc;
+    pub(super) use wasm_bindgen_futures::spawn_local;
+}
+#[cfg(target_arch = "wasm32")]
+use web::*;
 
 const MIDI_EVENT_QUEUE_CAPACITY: usize = 2048;
 
@@ -36,6 +53,11 @@ pub struct CpalMidir {
     midi_input: Mutex<Option<MidirInputDevice>>,
     midi_output: Mutex<Option<MidirOutputDevice>>,
 }
+
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for CpalMidir {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for CpalMidir {}
 
 /// All data needed for a CPAL input or output stream.
 struct CpalDevice {
@@ -92,6 +114,7 @@ enum MidiOutputTask<P: Plugin> {
 }
 
 impl<P: Plugin> Backend<P> for CpalMidir {
+    #[cfg(not(target_arch = "wasm32"))]
     fn run(
         &mut self,
         cb: impl FnMut(
@@ -125,7 +148,7 @@ impl<P: Plugin> Backend<P> for CpalMidir {
         // realtime unsafe, and to be able to output MIDI with midir you need to transform between
         // `MidiOutputPort` and `MidiOutputPortConnection` types by taking values out of an
         // `Option`.
-        std::thread::scope(|s| {
+        wasm_thread::scope(|s| {
             let mut _input_stream: Option<Stream> = None;
             let mut input_rb_consumer: Option<rtrb::Consumer<f32>> = None;
             if let Some(input) = &self.input {
@@ -358,11 +381,129 @@ impl<P: Plugin> Backend<P> for CpalMidir {
                 });
         });
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn run(
+        &mut self,
+        cb: impl FnMut(
+                &mut Buffer,
+                &mut AuxiliaryBuffers,
+                Transport,
+                &[PluginNoteEvent<P>],
+                &mut Vec<PluginNoteEvent<P>>,
+            ) -> bool
+            + 'static
+            + Send,
+    ) {
+        let (exit_sender, exit_receiver) = async_channel::bounded(1);
+
+        let mut input_rb_consumer: Option<rtrb::Consumer<f32>> = None;
+        let mut input_stream: Option<Stream> = None;
+        let start_output;
+        if let Some(input) = &self.input {
+            start_output = Arc::new(AtomicBool::new(false));
+
+            let (rb_producer, rb_consumer) = RingBuffer::new(
+                self.output.config.channels as usize * self.config.period_size as usize * 4,
+            );
+            input_rb_consumer = Some(rb_consumer);
+
+            macro_rules! build_input_streams {
+                ($sample_format:expr, $(($format:path, $primitive_type:ty)),*) => {
+                    match $sample_format {
+                        $($format => input.device.build_input_stream(
+                            &input.config,
+                            self.build_input_data_callback::<$primitive_type>(start_output.clone(), rb_producer),
+                            {
+                                let start_output = start_output.clone();
+                                move |err| {
+                                    nih_error!("Error during capture: {err:#}");
+                                    start_output.store(true, Ordering::SeqCst);
+                                }
+                            },
+                            None,
+                        ),)*
+                        format => todo!("Unsupported sample format {format}"),
+                    }
+                }
+            }
+            let stream = build_input_streams!(
+                input.sample_format,
+                (SampleFormat::I8, i8),
+                (SampleFormat::I16, i16),
+                (SampleFormat::I32, i32),
+                (SampleFormat::I64, i64),
+                (SampleFormat::U8, u8),
+                (SampleFormat::U16, u16),
+                (SampleFormat::U32, u32),
+                (SampleFormat::U64, u64),
+                (SampleFormat::F32, f32),
+                (SampleFormat::F64, f64)
+            );
+            let stream = stream.expect("Fatal error creating the input stream");
+            stream
+                .play()
+                .expect("Fatal error trying to start the capture stream");
+            input_stream = Some(stream);
+        } else {
+            start_output = Arc::new(AtomicBool::new(true));
+        }
+
+        macro_rules! build_output_streams {
+            ($sample_format:expr, $(($format:path, $primitive_type:ty)),*) => {
+                match $sample_format {
+                    $($format => self.output.device.build_output_stream(
+                        &self.output.config,
+                        self.build_output_data_callback::<P, $primitive_type>(
+                            exit_sender.clone(),
+                            start_output,
+                            input_rb_consumer,
+                            None,
+                            None,
+                            cb,
+                        ),
+                        move |err| {
+                            nih_error!("Error during playback: {err:#}");
+                            exit_sender.try_send(()).unwrap();
+                        },
+                        None,
+                    ),)*
+                    format => todo!("Unsupported sample format {format}"),
+                }
+            }
+        }
+        let output_stream = build_output_streams!(
+            self.output.sample_format,
+            (SampleFormat::I8, i8),
+            (SampleFormat::I16, i16),
+            (SampleFormat::I32, i32),
+            (SampleFormat::I64, i64),
+            (SampleFormat::U8, u8),
+            (SampleFormat::U16, u16),
+            (SampleFormat::U32, u32),
+            (SampleFormat::U64, u64),
+            (SampleFormat::F32, f32),
+            (SampleFormat::F64, f64)
+        );
+        let output_stream = output_stream.expect("Fatal error creating the output stream");
+        // TODO: Wait a period before doing this when also reading the input
+        output_stream
+            .play()
+            .expect("Fatal error trying to start the output stream");
+
+        spawn_local(async move {
+            let mut _streams = (input_stream, output_stream);
+            while let Ok(_) = exit_receiver.recv().await {
+                break;
+            }
+        });
+    }
 }
 
 impl CpalMidir {
     /// Initialize the backend with the specified host. Returns an error if this failed for whatever
     /// reason.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new<P: Plugin>(config: WrapperConfig, cpal_host_id: cpal::HostId) -> Result<Self> {
         let audio_io_layout = config.audio_io_layout_or_exit::<P>();
         let host = cpal::host_from_id(cpal_host_id).context("The Audio API is unavailable")?;
@@ -386,48 +527,222 @@ impl CpalMidir {
             .input_device
             .as_ref()
             .map(|name| -> Result<Device> {
-                let device = host
-                    .input_devices()
-                    .context("No audio input devices available")?
-                    // `.name()` returns a `Result` with a non-Eq error type so you can't compare this
-                    // directly
-                    .find(|d| d.name().as_deref().map(|n| n == name).unwrap_or(false))
-                    .with_context(|| {
-                        // This is a bit awkward, but instead of adding a dedicated option we'll just
-                        // list all of the available devices in the error message when the chosen device
-                        // does not exist
-                        let mut message =
-                            format!("Unknown input device '{name}'. Available devices are:");
-                        for device_name in host.input_devices().unwrap().flat_map(|d| d.name()) {
-                            message.push_str(&format!("\n{device_name}"))
-                        }
-
-                        message
-                    })?;
-
+                let device = Self::find_audio_input_device(&host, host.input_devices(), name)?;
                 Ok(device)
             })
             .transpose()?;
 
         let output_device = match config.output_device.as_ref() {
-            Some(name) => host
-                .output_devices()
-                .context("No audio output devices available")?
-                .find(|d| d.name().as_deref().map(|n| n == name).unwrap_or(false))
-                .with_context(|| {
-                    let mut message =
-                        format!("Unknown output device '{name}'. Available devices are:");
-                    for device_name in host.output_devices().unwrap().flat_map(|d| d.name()) {
-                        message.push_str(&format!("\n{device_name}"))
-                    }
-
-                    message
-                })?,
+            Some(name) => Self::find_audio_output_device(&host, host.output_devices(), name)?,
             None => host
                 .default_output_device()
                 .context("No default audio output device available")?,
         };
 
+        let (input, output) =
+            Self::get_audio_devices(&config, &audio_io_layout, input_device, output_device)?;
+
+        let midi_input = match &config.midi_input {
+            Some(midi_input_name) => {
+                // Midir lets us preemptively ignore MIDI messages we'll never use like active
+                // sensing and timing, but for maximum flexibility with NIH-plug's SysEx parsing
+                // types (which could technically be used to also parse those things) we won't do
+                // that.
+                let midi_backend = MidiInput::new(P::NAME)
+                    .context("Could not initialize the MIDI input backend")?;
+                let available_ports = midi_backend.ports();
+
+                // In case there somehow is a MIDI port with an empty name, we'll still want to
+                // preserve the behavior of an empty argument resulting in a listing of options.
+                let found_port = if !midi_input_name.is_empty() {
+                    // This API is a bit weird
+                    available_ports
+                        .iter()
+                        .find(|port| midi_backend.port_name(port).as_deref() == Ok(midi_input_name))
+                } else {
+                    None
+                };
+
+                match found_port {
+                    Some(port) => Some(MidirInputDevice {
+                        backend: midi_backend,
+                        port: port.clone(),
+                    }),
+                    None => {
+                        let mut message = format!(
+                            "Unknown input MIDI device '{midi_input_name}'. Available devices are:"
+                        );
+                        for port in available_ports {
+                            match midi_backend.port_name(&port) {
+                                Ok(device_name) => message.push_str(&format!("\n{device_name}")),
+                                Err(err) => message.push_str(&format!("\nERROR: {err:#}")),
+                            }
+                        }
+
+                        anyhow::bail!(message);
+                    }
+                }
+            }
+            None => None,
+        };
+
+        let midi_output = match &config.midi_output {
+            Some(midi_output_name) => {
+                let midi_backend = MidiOutput::new(P::NAME)
+                    .context("Could not initialize the MIDI output backend")?;
+                let available_ports = midi_backend.ports();
+
+                let found_port = if !midi_output_name.is_empty() {
+                    available_ports.iter().find(|port| {
+                        midi_backend.port_name(port).as_deref() == Ok(midi_output_name)
+                    })
+                } else {
+                    None
+                };
+
+                match found_port {
+                    Some(port) => Some(MidirOutputDevice {
+                        backend: midi_backend,
+                        port: port.clone(),
+                    }),
+                    None => {
+                        let mut message = format!(
+                            "Unknown output MIDI device '{midi_output_name}'. Available devices \
+                             are:"
+                        );
+                        for port in available_ports {
+                            match midi_backend.port_name(&port) {
+                                Ok(device_name) => message.push_str(&format!("\n{device_name}")),
+                                Err(err) => message.push_str(&format!("\nERROR: {err:#}")),
+                            }
+                        }
+
+                        anyhow::bail!(message);
+                    }
+                }
+            }
+            None => None,
+        };
+
+        Ok(CpalMidir {
+            config,
+            audio_io_layout,
+
+            input,
+            output,
+
+            midi_input: Mutex::new(midi_input),
+            midi_output: Mutex::new(midi_output),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn new<P: Plugin>(config: WrapperConfig, cpal_host_id: cpal::HostId) -> Result<Self> {
+        let audio_io_layout = config.audio_io_layout_or_exit::<P>();
+        let host = cpal::host_from_id(cpal_host_id).context("The Audio API is unavailable")?;
+        let web_host = match host.as_inner() {
+            cpal::platform::HostInner::WebAudio(web_host) => web_host,
+        };
+
+        if config.input_device.is_none() && audio_io_layout.main_input_channels.is_some() {
+            nih_log!(
+                "Audio inputs are not connected automatically to prevent feedback. Use the \
+                 '--input-device' option to choose an input device."
+            )
+        }
+
+        if config.midi_input.is_none() && P::MIDI_INPUT >= MidiConfig::Basic {
+            nih_log!("Use the '--midi-input' option to select a MIDI input device.")
+        }
+        if config.midi_output.is_none() && P::MIDI_OUTPUT >= MidiConfig::Basic {
+            nih_log!("Use the '--midi-output' option to select a MIDI output device.")
+        }
+
+        let input_device = {
+            if let Some(name) = config.input_device.as_ref() {
+                let device = Self::find_audio_input_device(
+                    &host,
+                    web_host.input_devices_async().await,
+                    name,
+                )?;
+                Some(device)
+            } else {
+                None
+            }
+        };
+
+        let output_device = match config.output_device.as_ref() {
+            Some(name) => {
+                Self::find_audio_output_device(&host, web_host.output_devices_async().await, name)?
+            }
+            None => host
+                .default_output_device()
+                .context("No default audio output device available")?
+                .into(),
+        };
+
+        let (input, output) =
+            Self::get_audio_devices(&config, &audio_io_layout, input_device, output_device)?;
+
+        Ok(CpalMidir {
+            config,
+            audio_io_layout,
+
+            input,
+            output,
+
+            midi_input: Mutex::new(None),
+            midi_output: Mutex::new(None),
+        })
+    }
+
+    fn find_audio_input_device<I: Iterator<Item = Device>>(
+        host: &Host,
+        devices: Result<I, DevicesError>,
+        name: &String,
+    ) -> Result<Device> {
+        devices
+            .context("No audio input devices available")?
+            // `.name()` returns a `Result` with a non-Eq error type so you can't compare this
+            // directly
+            .find(|d| d.name().as_deref().map(|n| n == name).unwrap_or(false))
+            .with_context(|| {
+                // This is a bit awkward, but instead of adding a dedicated option we'll just
+                // list all of the available devices in the error message when the chosen device
+                // does not exist
+                let mut message = format!("Unknown input device '{name}'. Available devices are:");
+                for device_name in host.input_devices().unwrap().flat_map(|d| d.name()) {
+                    message.push_str(&format!("\n{device_name}"))
+                }
+
+                message
+            })
+    }
+
+    fn find_audio_output_device<I: Iterator<Item = Device>>(
+        host: &Host,
+        devices: Result<I, DevicesError>,
+        name: &String,
+    ) -> Result<Device> {
+        devices
+            .context("No audio output devices available")?
+            .find(|d| d.name().as_deref().map(|n| n == name).unwrap_or(false))
+            .with_context(|| {
+                let mut message = format!("Unknown output device '{name}'. Available devices are:");
+                for device_name in host.output_devices().unwrap().flat_map(|d| d.name()) {
+                    message.push_str(&format!("\n{device_name}"))
+                }
+
+                message
+            })
+    }
+
+    fn get_audio_devices(
+        config: &WrapperConfig,
+        audio_io_layout: &AudioIOLayout,
+        input_device: Option<Device>,
+        output_device: Device,
+    ) -> Result<(Option<CpalDevice>, CpalDevice)> {
         let requested_sample_rate = cpal::SampleRate(config.sample_rate as u32);
         let requested_buffer_size = cpal::BufferSize::Fixed(config.period_size);
         let num_input_channels = audio_io_layout
@@ -532,103 +847,13 @@ impl CpalMidir {
             nih_warn!("Auxiliary outputs are not supported with this audio backend");
         }
 
-        let midi_input = match &config.midi_input {
-            Some(midi_input_name) => {
-                // Midir lets us preemptively ignore MIDI messages we'll never use like active
-                // sensing and timing, but for maximum flexibility with NIH-plug's SysEx parsing
-                // types (which could technically be used to also parse those things) we won't do
-                // that.
-                let midi_backend = MidiInput::new(P::NAME)
-                    .context("Could not initialize the MIDI input backend")?;
-                let available_ports = midi_backend.ports();
-
-                // In case there somehow is a MIDI port with an empty name, we'll still want to
-                // preserve the behavior of an empty argument resulting in a listing of options.
-                let found_port = if !midi_input_name.is_empty() {
-                    // This API is a bit weird
-                    available_ports
-                        .iter()
-                        .find(|port| midi_backend.port_name(port).as_deref() == Ok(midi_input_name))
-                } else {
-                    None
-                };
-
-                match found_port {
-                    Some(port) => Some(MidirInputDevice {
-                        backend: midi_backend,
-                        port: port.clone(),
-                    }),
-                    None => {
-                        let mut message = format!(
-                            "Unknown input MIDI device '{midi_input_name}'. Available devices are:"
-                        );
-                        for port in available_ports {
-                            match midi_backend.port_name(&port) {
-                                Ok(device_name) => message.push_str(&format!("\n{device_name}")),
-                                Err(err) => message.push_str(&format!("\nERROR: {err:#}")),
-                            }
-                        }
-
-                        anyhow::bail!(message);
-                    }
-                }
-            }
-            None => None,
-        };
-
-        let midi_output = match &config.midi_output {
-            Some(midi_output_name) => {
-                let midi_backend = MidiOutput::new(P::NAME)
-                    .context("Could not initialize the MIDI output backend")?;
-                let available_ports = midi_backend.ports();
-
-                let found_port = if !midi_output_name.is_empty() {
-                    available_ports.iter().find(|port| {
-                        midi_backend.port_name(port).as_deref() == Ok(midi_output_name)
-                    })
-                } else {
-                    None
-                };
-
-                match found_port {
-                    Some(port) => Some(MidirOutputDevice {
-                        backend: midi_backend,
-                        port: port.clone(),
-                    }),
-                    None => {
-                        let mut message = format!(
-                            "Unknown output MIDI device '{midi_output_name}'. Available devices \
-                             are:"
-                        );
-                        for port in available_ports {
-                            match midi_backend.port_name(&port) {
-                                Ok(device_name) => message.push_str(&format!("\n{device_name}")),
-                                Err(err) => message.push_str(&format!("\nERROR: {err:#}")),
-                            }
-                        }
-
-                        anyhow::bail!(message);
-                    }
-                }
-            }
-            None => None,
-        };
-
-        Ok(CpalMidir {
-            config,
-            audio_io_layout,
-
-            input,
-            output,
-
-            midi_input: Mutex::new(midi_input),
-            midi_output: Mutex::new(midi_output),
-        })
+        Ok((input, output))
     }
 
     fn build_input_data_callback<T>(
         &self,
-        input_unparker: Unparker,
+        #[cfg(not(target_arch = "wasm32"))] input_unparker: Unparker,
+        #[cfg(target_arch = "wasm32")] start_output: Arc<AtomicBool>,
         mut input_rb_producer: rtrb::Producer<f32>,
     ) -> impl FnMut(&[T], &InputCallbackInfo) + Send + 'static
     where
@@ -644,12 +869,23 @@ impl CpalMidir {
             for sample in data {
                 // If for whatever reason the input callback is fired twice before an output
                 // callback, then just spin on this until the push succeeds
+                #[cfg(not(target_arch = "wasm32"))]
                 while input_rb_producer.push(sample.to_sample()).is_err() {}
+
+                // Spinning is currently impossible because this runs on the same thread
+                // as the output.
+                #[cfg(target_arch = "wasm32")]
+                let _ = input_rb_producer.push(sample.to_sample());
             }
 
             // The run function is blocked until a single period has been processed here. After this
             // point output playback can start.
+            #[cfg(not(target_arch = "wasm32"))]
             input_unparker.unpark();
+
+            // Since parking is also not possible, we'll use an AtomicBool.
+            #[cfg(target_arch = "wasm32")]
+            start_output.store(true, Ordering::Relaxed);
         }
     }
 
@@ -671,10 +907,12 @@ impl CpalMidir {
 
     fn build_output_data_callback<P, T>(
         &self,
-        unparker: Unparker,
+        #[cfg(not(target_arch = "wasm32"))] unparker: Unparker,
+        #[cfg(target_arch = "wasm32")] exit_sender: Sender<()>,
+        #[cfg(target_arch = "wasm32")] start_output: Arc<AtomicBool>,
         mut input_rb_consumer: Option<rtrb::Consumer<f32>>,
         mut input_event_rb_consumer: Option<rtrb::Consumer<PluginNoteEvent<P>>>,
-        mut output_event_rb_producer: Option<crossbeam::channel::Sender<MidiOutputTask<P>>>,
+        mut output_event_rb_producer: Option<Sender<MidiOutputTask<P>>>,
         mut cb: impl FnMut(
                 &mut Buffer,
                 &mut AuxiliaryBuffers,
@@ -757,6 +995,11 @@ impl CpalMidir {
         let config = self.config.clone();
         let mut num_processed_samples = 0usize;
         move |data, _info| {
+            #[cfg(target_arch = "wasm32")]
+            if !start_output.load(Ordering::Relaxed) {
+                return;
+            }
+
             let mut transport = Transport::new(config.sample_rate);
             transport.pos_samples = Some(num_processed_samples as i64);
             transport.tempo = Some(config.tempo as f64);
@@ -772,13 +1015,18 @@ impl CpalMidir {
             // write-only (with `BufferManager` always zeroing them out when creating the buffers).
             match &mut input_rb_consumer {
                 Some(input_rb_consumer) => {
-                    for channel in main_io_storage.iter_mut() {
-                        for sample in channel {
+                    for i in 0..buffer_size {
+                        for channel in main_io_storage.iter_mut() {
                             loop {
                                 // Keep spinning on this if the output callback somehow outpaces the
                                 // input callback
                                 if let Ok(input_sample) = input_rb_consumer.pop() {
-                                    *sample = input_sample;
+                                    channel[i] = input_sample;
+                                    break;
+                                } else {
+                                    // Spinning is currently impossible because this runs on the
+                                    // same thread as the input.
+                                    #[cfg(target_arch = "wasm32")]
                                     break;
                                 }
                             }
@@ -896,7 +1144,11 @@ impl CpalMidir {
                     &mut midi_output_events,
                 ) {
                     // TODO: Some way to immediately terminate the stream here would be nice
+                    #[cfg(not(target_arch = "wasm32"))]
                     unparker.unpark();
+                    #[cfg(target_arch = "wasm32")]
+                    exit_sender.try_send(()).unwrap();
+
                     return;
                 }
             }

@@ -53,6 +53,11 @@ unsafe impl HasRawWindowHandle for ParentWindowHandleAdapter {
                 handle.hwnd = hwnd;
                 RawWindowHandle::Win32(handle)
             }
+            ParentWindowHandle::Web(id) => {
+                let mut handle = raw_window_handle::WebWindowHandle::empty();
+                handle.id = id;
+                RawWindowHandle::Web(handle)
+            }
         }
     }
 }

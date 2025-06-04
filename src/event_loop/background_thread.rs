@@ -7,7 +7,7 @@ use anymap3::Entry;
 use crossbeam::channel;
 use parking_lot::Mutex;
 use std::sync::{Arc, LazyLock, Weak};
-use std::thread::{self, JoinHandle};
+use wasm_thread::JoinHandle;
 
 use super::MainThreadExecutor;
 use crate::util::permit_alloc;
@@ -79,7 +79,7 @@ static HANDLE_MAP: LazyLock<Mutex<anymap3::Map<dyn std::any::Any + Send>>> =
 impl<T: Send + 'static, E: MainThreadExecutor<T> + 'static> WorkerThread<T, E> {
     fn spawn() -> Self {
         let (tasks_sender, tasks_receiver) = channel::bounded(super::TASK_QUEUE_CAPACITY);
-        let join_handle = thread::Builder::new()
+        let join_handle = wasm_thread::Builder::new()
             .name(String::from("bg-worker"))
             .spawn(move || worker_thread(tasks_receiver))
             .expect("Could not spawn background worker thread");
@@ -97,12 +97,29 @@ impl<T, E> Drop for WorkerThread<T, E> {
         self.tasks_sender
             .send(Message::Shutdown)
             .expect("Failed while sending worker thread shutdown request");
-        self.join_handle
-            .take()
-            // Only possible if the WorkerThread got dropped twice, somehow?
-            .expect("Missing Worker thread JoinHandle")
-            .join()
-            .expect("Worker thread panicked");
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.join_handle
+                .take()
+                // Only possible if the WorkerThread got dropped twice, somehow?
+                .expect("Missing Worker thread JoinHandle")
+                .join()
+                .expect("Worker thread panicked");
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            wasm_bindgen_futures::spawn_local({
+                let join_handle = self
+                    .join_handle
+                    .take()
+                    .expect("Missing Worker thread JoinHandle");
+                async {
+                    join_handle.join_async().await.unwrap();
+                }
+            });
+        }
     }
 }
 

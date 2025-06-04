@@ -4,7 +4,9 @@ use plugin_canvas::window::WindowAttributes;
 use plugin_canvas_slint::editor::EditorHandle as RawEditorHandle;
 use plugin_canvas_slint::editor::SlintEditor as RawSlintEditor;
 use plugin_canvas_slint::window_adapter::PluginCanvasWindowAdapter;
-use raw_window_handle::{AppKitWindowHandle, RawWindowHandle, Win32WindowHandle, XcbWindowHandle};
+use raw_window_handle::{
+    AppKitWindowHandle, RawWindowHandle, WebWindowHandle, Win32WindowHandle, XcbWindowHandle,
+};
 use std::any::Any;
 use std::num::{NonZeroIsize, NonZeroU32};
 use std::ptr::NonNull;
@@ -34,6 +36,7 @@ impl<E: SlintEditor + 'static> Editor for SlintEditorWrapper<E> {
             ParentWindowHandle::Win32Hwnd(hwnd) => RawWindowHandle::Win32(Win32WindowHandle::new(
                 NonZeroIsize::new(hwnd as isize).unwrap(),
             )),
+            ParentWindowHandle::Web(id) => RawWindowHandle::Web(WebWindowHandle::new(id)),
         };
         let raw_handle = RawSlintEditor::open(
             parent,

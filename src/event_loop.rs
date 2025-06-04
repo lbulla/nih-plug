@@ -8,6 +8,8 @@ mod background_thread;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_arch = "wasm32")]
+mod web;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -19,6 +21,8 @@ pub(crate) use self::linux::LinuxEventLoop as OsEventLoop;
 #[cfg_attr(not(feature = "vst3"), allow(unused_imports))]
 #[cfg(target_os = "macos")]
 pub(crate) use self::macos::MacOSEventLoop as OsEventLoop;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use self::web::WebEventLoop as OsEventLoop;
 #[cfg_attr(not(feature = "vst3"), allow(unused_imports))]
 #[cfg(target_os = "windows")]
 pub(crate) use self::windows::WindowsEventLoop as OsEventLoop;

@@ -1,0 +1,17 @@
+{
+  "backend": "Auto",
+  "audio_layout": null,
+  "sample_rate": 48000.0,
+  "period_size": 512,
+  "input_device": "null",
+  "output_device": null,
+  "midi_input": null,
+  "midi_output": null,
+  "connect_jack_inputs": null,
+  "connect_jack_midi_input": null,
+  "connect_jack_midi_output": null,
+  "dpi_scale": 1.0,
+  "tempo": 120.0,
+  "timesig_num": 4,
+  "timesig_denom": 4
+}

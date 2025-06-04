@@ -6,6 +6,7 @@ pub use crate::debug::*;
 
 #[cfg(all(feature = "au", target_os = "macos"))]
 pub use crate::nih_export_au;
+#[cfg(feature = "clap")]
 pub use crate::nih_export_clap;
 #[cfg(feature = "vst3")]
 pub use crate::nih_export_vst3;
@@ -38,10 +39,12 @@ pub use crate::params::Params;
 pub use crate::params::{BoolParam, FloatParam, IntParam, Param, ParamFlags};
 #[cfg(all(feature = "au", target_os = "macos"))]
 pub use crate::plugin::au::AuPlugin;
+#[cfg(feature = "clap")]
 pub use crate::plugin::clap::{ClapPlugin, PolyModulationConfig};
 #[cfg(feature = "vst3")]
 pub use crate::plugin::vst3::Vst3Plugin;
 pub use crate::plugin::{Plugin, ProcessStatus, TaskExecutor};
+#[cfg(feature = "clap")]
 pub use crate::wrapper::clap::features::ClapFeature;
 pub use crate::wrapper::state::PluginState;
 #[cfg(feature = "vst3")]

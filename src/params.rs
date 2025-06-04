@@ -220,10 +220,11 @@ pub(crate) trait ParamMut: Param {
     /// parameter's range. The normalized value will be snapped to the step size for continuous
     /// parameters (i.e. [`FloatParam`]).
     ///
-    /// Returns whether or not the value has changed. Any parameter callbacks are only run the value
+    /// Returns whether the value has changed or not. Any parameter callbacks are only run the value
     /// has actually changed.
     ///
     /// This does **not** update the smoother.
+    #[allow(unused)] // Only used for clap atm.
     fn modulate_value(&self, modulation_offset: f32) -> bool;
 
     /// Update the smoother state to point to the current value. Also used when initializing and

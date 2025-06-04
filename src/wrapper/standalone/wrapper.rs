@@ -1,14 +1,28 @@
 use atomic_refcell::AtomicRefCell;
-use baseview::{EventStatus, Window, WindowHandler, WindowOpenOptions};
-use crossbeam::channel::{self, Sender};
 use crossbeam::queue::ArrayQueue;
 use parking_lot::Mutex;
-use raw_window_handle::HasRawWindowHandle;
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::thread;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    pub(super) use baseview::{EventStatus, Window, WindowHandler, WindowOpenOptions};
+    pub(super) use crossbeam::channel::{bounded, Receiver, Sender};
+    pub(super) use raw_window_handle::HasRawWindowHandle;
+    pub(super) use std::any::Any;
+}
+#[cfg(not(target_arch = "wasm32"))]
+use native::*;
+
+#[cfg(target_arch = "wasm32")]
+mod web {
+    pub(super) use async_channel::{bounded, Receiver, Sender};
+    pub(super) use wasm_bindgen::JsCast;
+    pub(super) use web_sys::{BeforeUnloadEvent, HtmlCanvasElement};
+}
+#[cfg(target_arch = "wasm32")]
+use web::*;
 
 use super::backend::Backend;
 use super::config::WrapperConfig;
@@ -44,7 +58,7 @@ pub struct Wrapper<P: Plugin, B: Backend<P>> {
     /// creating an editor. Wrapped in an `AtomicRefCell` because it needs to be initialized late.
     pub editor: AtomicRefCell<Option<Arc<Mutex<Box<dyn Editor>>>>>,
     /// A channel for sending tasks to the GUI window, if the plugin has a GUI. Set in `run()`.
-    gui_tasks_sender: AtomicRefCell<Option<Sender<GuiTask>>>,
+    gui_task_sender: AtomicRefCell<Option<Sender<GuiTask>>>,
 
     /// A realtime-safe task queue so the plugin can schedule tasks that need to be run later on the
     /// GUI thread. See the same field in the VST3 wrapper for more information on why this looks
@@ -80,9 +94,9 @@ pub struct Wrapper<P: Plugin, B: Backend<P>> {
     /// In other words, the GUI thread acts as a sender and then as a receiver, while the audio
     /// thread acts as a receiver and then as a sender. That way deallocation can happen on the GUI
     /// thread. All of this happens without any blocking on the audio thread.
-    updated_state_sender: channel::Sender<PluginState>,
+    updated_state_sender: Sender<PluginState>,
     /// The receiver belonging to [`new_state_sender`][Self::new_state_sender].
-    updated_state_receiver: channel::Receiver<PluginState>,
+    updated_state_receiver: Receiver<PluginState>,
     /// The current latency in samples, as set by the plugin through the [`InitContext`] and the
     /// [`ProcessContext`]. This value may not be used depending on the audio backend, but it's
     /// still kept track of to avoid firing debug assertions multiple times for the same latency
@@ -113,6 +127,7 @@ pub enum WrapperError {
     InitializationFailed,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct WrapperWindowHandler {
     /// The editor handle for the plugin's open editor. The editor should clean itself up when it
     /// gets dropped.
@@ -120,17 +135,20 @@ struct WrapperWindowHandler {
 
     /// This is used to communicate with the wrapper from the audio thread and from within the
     /// baseview window handler on the GUI thread.
-    gui_task_receiver: channel::Receiver<GuiTask>,
+    gui_task_receiver: Receiver<GuiTask>,
 }
 
 /// A message sent to the GUI thread.
 pub enum GuiTask {
     /// Resize the window to the following physical size.
+    /// WASM: The canvas should be resized in the plugin's editor.
+    #[cfg(not(target_arch = "wasm32"))]
     Resize(u32, u32),
     /// The close window. This will cause the application to terminate.
     Close,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WindowHandler for WrapperWindowHandler {
     fn on_frame(&mut self, window: &mut Window) {
         while let Ok(task) = self.gui_task_receiver.try_recv() {
@@ -173,6 +191,38 @@ impl<P: Plugin, B: Backend<P>> MainThreadExecutor<Task<P>> for Wrapper<P, B> {
 }
 
 impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
+    #[cfg(target_arch = "wasm32")]
+    const USE_COOKIES: &'static str = "use-cookies";
+    #[cfg(target_arch = "wasm32")]
+    const STATE_COOKIE: &'static str = "state";
+
+    #[cfg(target_arch = "wasm32")]
+    fn load_state_from_cookies(&self) -> bool {
+        if let Some(state) = wasm_cookies::get(Self::STATE_COOKIE) {
+            if let Ok(state) = state {
+                if let Ok(mut state) = serde_json::from_str(&state) {
+                    self.set_state_inner(&mut state);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn save_state_to_cookies(&self) {
+        if let Some(use_cookies) = wasm_cookies::get(Self::USE_COOKIES) {
+            if use_cookies.is_ok_and(|u| u == "1") {
+                let state = self.get_state_object();
+                let state_json = serde_json::to_string(&state).unwrap();
+                let options = wasm_cookies::CookieOptions::default()
+                    .secure()
+                    .with_same_site(wasm_cookies::SameSite::Strict);
+                wasm_cookies::set(Self::STATE_COOKIE, state_json.as_str(), &options);
+            }
+        }
+    }
+
     /// Instantiate a new instance of the standalone wrapper. Returns an error if the plugin does
     /// not accept the IO configuration from the wrapper config.
     pub fn new(backend: B, config: WrapperConfig) -> Result<Arc<Self>, WrapperError> {
@@ -187,7 +237,7 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
 
         // This is used to allow the plugin to restore preset data from its editor, see the comment
         // on `Self::updated_state_sender`
-        let (updated_state_sender, updated_state_receiver) = channel::bounded(0);
+        let (updated_state_sender, updated_state_receiver) = bounded(1);
 
         // For consistency's sake we'll include the same assertions as the other backends
         // TODO: Move these common checks to a function instead of repeating them in every wrapper
@@ -225,7 +275,7 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
             // Initialized later as it needs a reference to the wrapper for the async executor
             editor: AtomicRefCell::new(None),
             // Set in `run()`
-            gui_tasks_sender: AtomicRefCell::new(None),
+            gui_task_sender: AtomicRefCell::new(None),
 
             // Also initialized later as it also needs a reference to the wrapper
             event_loop: AtomicRefCell::new(None),
@@ -307,9 +357,10 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
     ///
     /// Will return an error if the plugin threw an error during audio processing or if the editor
     /// could not be opened.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn run(self: Arc<Self>) -> Result<(), WrapperError> {
-        let (gui_task_sender, gui_task_receiver) = channel::bounded(512);
-        *self.gui_tasks_sender.borrow_mut() = Some(gui_task_sender.clone());
+        let (gui_task_sender, gui_task_receiver) = bounded(512);
+        *self.gui_task_sender.borrow_mut() = Some(gui_task_sender.clone());
 
         // We'll spawn a separate thread to handle IO and to process audio. This audio thread should
         // terminate together with this function.
@@ -317,7 +368,9 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
         let audio_thread = {
             let this = self.clone();
             let terminate_audio_thread = terminate_audio_thread.clone();
-            thread::spawn(move || this.run_audio_thread(terminate_audio_thread, gui_task_sender))
+            wasm_thread::spawn(move || {
+                this.run_audio_thread(terminate_audio_thread, gui_task_sender)
+            })
         };
 
         match self.editor.borrow().clone() {
@@ -378,7 +431,7 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
                 // TODO: Properly block until SIGINT is received if the plugin does not have an editor
                 // TODO: Make sure to handle `GuiTask::Close` here as well
                 nih_log!("{} does not have a GUI, blocking indefinitely...", P::NAME);
-                std::thread::park();
+                wasm_thread::park();
             }
         }
 
@@ -388,6 +441,104 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
         // Some plugins may use this to clean up resources. Should not be needed for the standalone
         // application, but it seems like a good idea to stay consistent.
         self.plugin.lock().deactivate();
+
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn run(self: Arc<Self>) -> Result<(), WrapperError> {
+        let (gui_task_sender, gui_task_receiver) = bounded(512);
+        *self.gui_task_sender.borrow_mut() = Some(gui_task_sender.clone());
+
+        let cookies_loaded = self.load_state_from_cookies();
+
+        let terminate_audio_thread = Arc::new(AtomicBool::new(false));
+        self.clone()
+            .run_audio_thread(terminate_audio_thread.clone(), gui_task_sender.clone());
+
+        let window = web_sys::window().unwrap();
+        let on_before_unload = wasm_bindgen::closure::Closure::<dyn Fn(BeforeUnloadEvent)>::new(
+            move |_: BeforeUnloadEvent| {
+                // TODO: The streams do not get destroyed reliably,
+                //       and therefore the wrapper, too.
+                terminate_audio_thread.store(true, Ordering::SeqCst);
+                gui_task_sender.try_send(GuiTask::Close).unwrap();
+            },
+        );
+        window
+            .add_event_listener_with_callback(
+                "beforeunload",
+                on_before_unload.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+
+        match self.editor.borrow().clone() {
+            Some(editor) => {
+                let document = window.document().unwrap();
+
+                let canvas_collection = document.get_elements_by_tag_name("canvas");
+                let canvas = canvas_collection
+                    .item(0)
+                    .and_then(|c| c.dyn_into::<HtmlCanvasElement>().ok());
+                let mut remove_canvas = false;
+                let canvas = canvas.unwrap_or_else(|| {
+                    remove_canvas = true;
+                    let c = document
+                        .create_element("canvas")
+                        .unwrap()
+                        .dyn_into::<HtmlCanvasElement>()
+                        .unwrap();
+                    c.dataset().set("rawHandle", "0").unwrap();
+                    document.body().unwrap().append_child(&c).unwrap();
+                    c
+                });
+
+                let canvas_id = canvas.dataset().get("rawHandle").unwrap();
+                let parent = ParentWindowHandle::Web(
+                    canvas_id
+                        .parse()
+                        .expect("Canvas ID could not be casted to u32"),
+                );
+                let context = self.clone().make_gui_context();
+
+                let _editor_handle = {
+                    let editor = editor.lock();
+                    if !cookies_loaded {
+                        editor.set_scale_factor(self.config.dpi_scale);
+                    }
+                    editor.spawn(parent, context)
+                };
+
+                while let Ok(task) = gui_task_receiver.recv().await {
+                    match task {
+                        GuiTask::Close => break,
+                    }
+                }
+
+                if remove_canvas {
+                    canvas.remove();
+                }
+            }
+            None => {
+                nih_log!("{} does not have a GUI, blocking indefinitely...", P::NAME);
+
+                while let Ok(task) = gui_task_receiver.recv().await {
+                    match task {
+                        GuiTask::Close => break,
+                    }
+                }
+            }
+        }
+
+        self.plugin.lock().deactivate();
+        self.save_state_to_cookies();
+
+        window
+            .remove_event_listener_with_callback(
+                "beforeunload",
+                on_before_unload.as_ref().unchecked_ref(),
+            )
+            .unwrap();
 
         Ok(())
     }
@@ -433,10 +584,11 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
         }
     }
 
-    /// Update the plugin's internal state, called by the plugin itself from the GUI thread. To
-    /// prevent corrupting data and changing parameters during processing the actual state is only
+    /// Update the plugin's internal state, called by the plugin itself, from the GUI thread. To
+    /// prevent corrupting data and changing parameters during processing, the actual state is only
     /// updated at the end of the audio processing cycle.
     pub fn set_state_object_from_gui(&self, state: PluginState) {
+        #[cfg(not(target_arch = "wasm32"))]
         match self.updated_state_sender.send(state) {
             Ok(_) => {
                 // As mentioned above, the state object will be passed back to this thread
@@ -450,6 +602,26 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
                     err
                 );
             }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let updated_state_sender = self.updated_state_sender.clone();
+            let updated_state_receiver = self.updated_state_receiver.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match updated_state_sender.send(state).await {
+                    Ok(_) => {
+                        let state = updated_state_receiver.recv().await;
+                        drop(state);
+                    }
+                    Err(err) => {
+                        nih_debug_assert_failure!(
+                            "Could not send new state to the audio thread: {:?}",
+                            err
+                        );
+                    }
+                }
+            });
         }
     }
 
@@ -477,15 +649,18 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
 
     /// Request the outer window to be resized to the editor's current size.
     pub fn request_resize(&self) {
-        if let Some(gui_tasks_sender) = self.gui_tasks_sender.borrow().as_ref() {
-            let (unscaled_width, unscaled_height) =
-                self.editor.borrow().as_ref().unwrap().lock().size();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(gui_task_sender) = self.gui_task_sender.borrow().as_ref() {
+                let (unscaled_width, unscaled_height) =
+                    self.editor.borrow().as_ref().unwrap().lock().size();
 
-            // This will cause the editor to be resized at the start of the next frame
-            let push_successful = gui_tasks_sender
-                .send(GuiTask::Resize(unscaled_width, unscaled_height))
-                .is_ok();
-            nih_debug_assert!(push_successful, "Could not queue window resize");
+                // This will cause the editor to be resized at the start of the next frame
+                let push_successful = gui_task_sender
+                    .send(GuiTask::Resize(unscaled_width, unscaled_height))
+                    .is_ok();
+                nih_debug_assert!(push_successful, "Could not queue window resize");
+            }
         }
     }
 
@@ -503,7 +678,7 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
     fn run_audio_thread(
         self: Arc<Self>,
         should_terminate: Arc<AtomicBool>,
-        gui_task_sender: channel::Sender<GuiTask>,
+        gui_task_sender: Sender<GuiTask>,
     ) {
         self.clone().backend.borrow_mut().run(
             move |buffer, aux, transport, input_events, output_events| {
@@ -526,11 +701,24 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
                             nih_error!("The plugin returned an error while processing:");
                             nih_error!("{}", err);
 
-                            let push_successful = gui_task_sender.send(GuiTask::Close).is_ok();
-                            nih_debug_assert!(
-                                push_successful,
-                                "Could not queue window close, the editor will remain open"
-                            );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let push_successful = gui_task_sender.send(GuiTask::Close).is_ok();
+                                nih_debug_assert!(
+                                    push_successful,
+                                    "Could not queue window close, the editor will remain open"
+                                );
+                            }
+
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let push_successful =
+                                    gui_task_sender.try_send(GuiTask::Close).is_ok();
+                                nih_debug_assert!(
+                                    push_successful,
+                                    "Could not queue window close, the editor will remain open"
+                                );
+                            }
 
                             return false;
                         }
@@ -557,24 +745,40 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
                         }
                     }
 
-                    // After processing audio, we'll check if the editor has sent us updated plugin
-                    // state.  We'll restore that here on the audio thread to prevent changing the
-                    // values during the process call and also to prevent inconsistent state when
-                    // the host also wants to load plugin state.
-                    // FIXME: Zero capacity channels allocate on receiving, find a better
-                    //        alternative that doesn't do that
-                    let updated_state = permit_alloc(|| self.updated_state_receiver.try_recv());
-                    if let Ok(mut state) = updated_state {
-                        self.set_state_inner(&mut state);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        // After processing audio, we'll check if the editor has sent us updated
+                        // plugin state. We'll restore that here on the audio thread to prevent
+                        // changing the values during the process call and also to prevent
+                        // inconsistent state when the host also wants to load plugin state.
+                        // FIXME: Zero capacity channels allocate on receiving, find a better
+                        //        alternative that doesn't do that
+                        let updated_state = permit_alloc(|| self.updated_state_receiver.try_recv());
+                        if let Ok(mut state) = updated_state {
+                            self.set_state_inner(&mut state);
 
-                        // We'll pass the state object back to the GUI thread so deallocation can
-                        // happen there without potentially blocking the audio thread
-                        if let Err(err) = self.updated_state_sender.send(state) {
-                            nih_debug_assert_failure!(
-                                "Failed to send state object back to GUI thread: {}",
-                                err
-                            );
-                        };
+                            // We'll pass the state object back to the GUI thread so deallocation
+                            // can happen there without potentially blocking the audio thread
+                            if let Err(err) = self.updated_state_sender.send(state) {
+                                nih_debug_assert_failure!(
+                                    "Failed to send state object back to GUI thread: {}",
+                                    err
+                                );
+                            };
+                        }
+                    }
+
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if let Ok(mut state) = self.updated_state_receiver.try_recv() {
+                            self.set_state_inner(&mut state);
+                            if let Err(err) = self.updated_state_sender.try_send(state) {
+                                nih_debug_assert_failure!(
+                                    "Failed to send state object back to GUI thread: {}",
+                                    err
+                                );
+                            };
+                        }
                     }
 
                     true

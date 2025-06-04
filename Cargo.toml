@@ -13,44 +13,44 @@ repository = "https://github.com/robbert-vdh/nih-plug"
 [workspace]
 resolver = "2"
 members = [
-  "nih_plug_derive",
-  "nih_plug_egui",
-  "nih_plug_iced",
-  "nih_plug_slint",
-  "nih_plug_vizia",
-  "nih_plug_xtask",
+    "nih_plug_derive",
+    "nih_plug_egui",
+    "nih_plug_iced",
+    "nih_plug_slint",
+    "nih_plug_vizia",
+    "nih_plug_xtask",
 
-  "auval",
-  "cargo_nih_plug",
-  "xtask",
+    "auval",
+    "cargo_nih_plug",
+    "xtask",
 
-  "plugins/examples/byo_gui_gl",
-  "plugins/examples/byo_gui_softbuffer",
-  "plugins/examples/byo_gui_wgpu",
-  "plugins/examples/gain",
-  "plugins/examples/gain_gui_egui",
-  "plugins/examples/gain_gui_iced",
-  "plugins/examples/gain_gui_slint",
-  "plugins/examples/gain_gui_vizia",
-  "plugins/examples/midi_inverter",
-  "plugins/examples/poly_mod_synth",
-  "plugins/examples/sine",
-  "plugins/examples/stft",
-  "plugins/examples/sysex",
+    "plugins/examples/byo_gui_gl",
+    "plugins/examples/byo_gui_softbuffer",
+    "plugins/examples/byo_gui_wgpu",
+    "plugins/examples/gain",
+    "plugins/examples/gain_gui_egui",
+    "plugins/examples/gain_gui_iced",
+    "plugins/examples/gain_gui_slint",
+    "plugins/examples/gain_gui_vizia",
+    "plugins/examples/midi_inverter",
+    "plugins/examples/poly_mod_synth",
+    "plugins/examples/sine",
+    "plugins/examples/stft",
+    "plugins/examples/sysex",
 
-  "plugins/soft_vacuum",
-  "plugins/buffr_glitch",
-  "plugins/crisp",
-  "plugins/crossover",
-  "plugins/diopser",
-  "plugins/loudness_war_winner",
-  "plugins/puberty_simulator",
-  "plugins/safety_limiter",
-  "plugins/spectral_compressor",
+    "plugins/soft_vacuum",
+    "plugins/buffr_glitch",
+    "plugins/crisp",
+    "plugins/crossover",
+    "plugins/diopser",
+    "plugins/loudness_war_winner",
+    "plugins/puberty_simulator",
+    "plugins/safety_limiter",
+    "plugins/spectral_compressor",
 ]
 
 [features]
-default = ["au", "vst3"]
+default = ["au", "clap", "vst3"]
 
 # Enabling this feature will cause the plugin to terminate when allocations
 # occur in the processing function during debug builds. Keep in mind that panics
@@ -60,15 +60,24 @@ assert_process_allocs = ["dep:assert_no_alloc"]
 # Enables an export target for standalone binaries through the
 # `nih_export_standalone()` function. Disabled by default as this requires
 # building additional dependencies for audio and MIDI handling.
-standalone = ["dep:baseview", "dep:clap", "dep:cpal", "dep:jack", "dep:midir", "dep:rtrb"]
+standalone = [
+    "dep:baseview",
+    "dep:clap",
+    "dep:cpal",
+    "dep:jack",
+    "dep:midir",
+    "dep:rtrb",
+]
 
 au = [
-  "nih_plug_derive/au",
-  "dep:block2",
-  "dep:const_for",
-  "dep:coreaudio-sys",
-  "dep:dispatch",
+    "nih_plug_derive/au",
+    "dep:block2",
+    "dep:const_for",
+    "dep:coreaudio-sys",
+    "dep:dispatch",
 ]
+
+clap = ["dep:clap", "dep:clap-sys"]
 
 # Enables the `nih_export_vst3!()` macro. Enabled by default. This feature
 # exists mostly for GPL-compliance reasons, since even if you don't use the VST3
@@ -98,7 +107,7 @@ backtrace = "0.3.65"
 bitflags = "1.3"
 cfg-if = "1.0"
 # This supports CLAP 1.2.2
-clap-sys = {  git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
+clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156", optional = true }
 crossbeam = "0.8"
 log = { version = "0.4", features = ["std", "release_max_level_info"] }
 midi-consts = "0.1"
@@ -107,19 +116,20 @@ parking_lot = "0.12"
 raw-window-handle = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+wasm_thread = "0.3.3"
 widestring = "1.0.0-beta.1"
 
 # Used for the `assert_process_allocs` feature
-assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid", features = ["backtrace", "log"], optional = true }
+assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid", features = [
+    "backtrace",
+    "log",
+], optional = true }
 
-# Used for the `standalone` feature
-# NOTE: OpenGL support is not needed here, but rust-analyzer gets confused when
-#       some crates do use it and others don't
-baseview = { git = "https://github.com/lbulla/baseview.git", branch = "f/fix_redraw", features = ["opengl"], optional = true }
 # All the claps!
-clap = { version = "4.1.8", features = ["derive", "wrap_help"], optional = true }
-cpal = { version = "0.15", optional = true }
-jack = { version = "0.11.4", optional = true }
+clap = { version = "4.1.8", features = [
+    "derive",
+    "wrap_help",
+], optional = true }
 midir = { version = "0.9.1", optional = true }
 rtrb = { version = "0.2.2", optional = true }
 
@@ -140,32 +150,59 @@ block2 = { version = "0.5.1", features = ["apple"], optional = true }
 core-foundation = "0.9.3"
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", features = [
-  "NSEvent",
-  "NSResponder",
-  "NSView",
+    "NSEvent",
+    "NSResponder",
+    "NSView",
 ] }
 objc2-foundation = { version = "0.2.2", features = [
-  "dispatch",
-  "NSBundle",
-  "NSGeometry",
-  "NSString",
-  "NSThread",
-  "NSURL",
+    "dispatch",
+    "NSBundle",
+    "NSGeometry",
+    "NSString",
+    "NSThread",
+    "NSURL",
 ] }
 
-const_for = {  version = "0.1.5", optional = true }
+const_for = { version = "0.1.5", optional = true }
 coreaudio-sys = { version = "0.2.16", optional = true }
 dispatch = { version = "0.2.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows]
 version = "0.44"
 features = [
-  "Win32_Foundation",
-  "Win32_Graphics_Gdi",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_System_LibraryLoader",
-  "Win32_System_Performance",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
 ]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Used for the `standalone` feature
+# NOTE: OpenGL support is not needed here, but rust-analyzer gets confused when
+#       some crates do use it and others don't
+baseview = { git = "https://github.com/lbulla/baseview.git", branch = "f/fix_redraw", features = [
+    "opengl",
+], optional = true }
+cpal = { git = "https://github.com/lbulla/cpal.git", branch = "f/web", optional = true }
+instant = "0.1.13"
+jack = { version = "0.11.4", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+async-channel = "2.3.1"
+console_error_panic_hook = "0.1.7"
+console_log = "1.0.0"
+cpal = { git = "https://github.com/lbulla/cpal.git", branch = "f/web", features = ["wasm-bindgen"], optional = true }
+instant = { version = "0.1.13", features = ["wasm-bindgen"] }
+js-sys = "0.3.77"
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4.50"
+wasm-cookies = "0.2.1"
+web-sys = { version = "0.3.77", default-features = false, features = [
+    "BeforeUnloadEvent",
+    "DomStringMap",
+    "HtmlCollection",
+] }
 
 [profile.release]
 lto = "thin"

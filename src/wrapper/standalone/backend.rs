@@ -2,10 +2,12 @@ use crate::prelude::{AuxiliaryBuffers, PluginNoteEvent, Transport};
 
 mod cpal;
 mod dummy;
+#[cfg(not(target_arch = "wasm32"))]
 mod jack;
 
 pub use self::cpal::CpalMidir;
 pub use self::dummy::Dummy;
+#[cfg(not(target_arch = "wasm32"))]
 pub use self::jack::Jack;
 pub use crate::buffer::Buffer;
 pub use crate::plugin::Plugin;

@@ -1,6 +1,6 @@
 //! Traits for working with plugin editors.
 
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle, WebWindowHandle};
 use std::any::Any;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -88,6 +88,8 @@ pub enum ParentWindowHandle {
     AppKitNsView(*mut c_void),
     /// A handle to the host's parent window. Used only on Windows.
     Win32Hwnd(*mut c_void),
+    /// A handle to the host's parent window. Used only on the web.
+    Web(u32),
 }
 
 unsafe impl HasRawWindowHandle for ParentWindowHandle {
@@ -107,6 +109,11 @@ unsafe impl HasRawWindowHandle for ParentWindowHandle {
                 let mut handle = raw_window_handle::Win32WindowHandle::empty();
                 handle.hwnd = hwnd;
                 RawWindowHandle::Win32(handle)
+            }
+            ParentWindowHandle::Web(id) => {
+                let mut handle = WebWindowHandle::empty();
+                handle.id = id;
+                RawWindowHandle::Web(handle)
             }
         }
     }

@@ -1,10 +1,15 @@
-use backtrace::Backtrace;
-use std::arch::asm;
 use std::cmp;
 use std::marker::PhantomData;
 use std::os::raw::c_char;
 
-use crate::util::permit_alloc;
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    pub(super) use crate::util::permit_alloc;
+    pub(super) use backtrace::Backtrace;
+    pub(super) use std::arch::asm;
+}
+#[cfg(not(target_arch = "wasm32"))]
+use native::*;
 
 pub(crate) mod buffer_management;
 #[cfg(debug_assertions)]
@@ -29,6 +34,7 @@ compile_error!("The 'assert_process_allocs' feature does not work correctly in c
 static A: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
 /// A Rabin fingerprint based string hash for parameter ID strings.
+#[allow(unused)] // Only used for clap atm.
 pub fn hash_param_id(id: &str) -> u32 {
     let mut hash: u32 = 0;
     for char in id.bytes() {
@@ -45,6 +51,7 @@ pub fn hash_param_id(id: &str) -> u32 {
 /// The equivalent of the `strlcpy()` C function. Copy `src` to `dest` as a null-terminated
 /// C-string. If `dest` does not have enough capacity, add a null terminator at the end to prevent
 /// buffer overflows.
+#[allow(unused)] // Only used for clap atm.
 pub fn strlcpy(dest: &mut [c_char], src: &str) {
     if dest.is_empty() {
         return;
@@ -63,6 +70,7 @@ pub fn strlcpy(dest: &mut [c_char], src: &str) {
 
 /// Clamp an input event's timing to the buffer length. Emits a debug assertion failure if it was
 /// out of bounds.
+#[allow(unused)] // Only used for clap atm.
 #[inline]
 pub fn clamp_input_event_timing(timing: u32, total_buffer_len: u32) -> u32 {
     // If `total_buffer_len == 0`, then 0 is a valid timing
@@ -78,6 +86,7 @@ pub fn clamp_input_event_timing(timing: u32, total_buffer_len: u32) -> u32 {
 
 /// Clamp an output event's timing to the buffer length. Emits a debug assertion failure if it was
 /// out of bounds.
+#[allow(unused)] // Only used for clap atm.
 #[inline]
 pub fn clamp_output_event_timing(timing: u32, total_buffer_len: u32) -> u32 {
     let last_valid_index = total_buffer_len.saturating_sub(1);
@@ -103,35 +112,45 @@ pub fn clamp_output_event_timing(timing: u32, total_buffer_len: u32) -> u32 {
 /// - A file path, in which case the output gets appended to the end of that file which will be
 ///   created if necessary.
 pub fn setup_logger() {
-    let log_level = if cfg!(debug_assertions) {
-        log::LevelFilter::Trace
-    } else {
-        log::LevelFilter::Info
-    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let log_level = if cfg!(debug_assertions) {
+            log::LevelFilter::Trace
+        } else {
+            log::LevelFilter::Info
+        };
 
-    let logger_builder = nih_log::LoggerBuilder::new(log_level)
-        .filter_module("cosmic_text::buffer")
-        .filter_module("cosmic_text::shape")
-        .filter_module("selectors::matching");
+        let logger_builder = nih_log::LoggerBuilder::new(log_level)
+            .filter_module("cosmic_text::buffer")
+            .filter_module("cosmic_text::shape")
+            .filter_module("selectors::matching");
 
-    // Always show the module in debug builds, makes it clearer where messages are coming from and
-    // it helps set up filters
-    #[cfg(debug_assertions)]
-    let logger_builder = logger_builder.always_show_module_path();
+        // Always show the module in debug builds, makes it clearer where messages are coming from and
+        // it helps set up filters
+        #[cfg(debug_assertions)]
+        let logger_builder = logger_builder.always_show_module_path();
 
-    // In release builds there are some more logging messages from libraries that are not relevant
-    // to the end user that can be filtered out
-    #[cfg(not(debug_assertions))]
-    let logger_builder = logger_builder.filter_module("cosmic_text::font::system::std");
+        // In release builds there are some more logging messages from libraries that are not relevant
+        // to the end user that can be filtered out
+        #[cfg(not(debug_assertions))]
+        let logger_builder = logger_builder.filter_module("cosmic_text::font::system::std");
 
-    let logger_set = logger_builder.build_global().is_ok();
-    if logger_set {
-        log_panics();
+        let logger_set = logger_builder.build_global().is_ok();
+        if logger_set {
+            log_panics();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        console_error_panic_hook::set_once();
+        console_log::init().unwrap();
     }
 }
 
 /// This is copied from same as the `log_panics` crate, but it's wrapped in `permit_alloc()`.
 /// Otherwise logging panics will trigger `assert_no_alloc` as this also allocates.
+#[cfg(not(target_arch = "wasm32"))]
 fn log_panics() {
     std::panic::set_hook(Box::new(|info| {
         permit_alloc(|| {
@@ -139,7 +158,7 @@ fn log_panics() {
             // `nih_error!()` and `Shim` has been inlined
             let backtrace = Backtrace::new();
 
-            let thread = std::thread::current();
+            let thread = wasm_thread::current();
             let thread = thread.name().unwrap_or("unnamed");
 
             let msg = match info.payload().downcast_ref::<&'static str>() {

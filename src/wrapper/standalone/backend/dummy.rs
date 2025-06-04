@@ -1,6 +1,16 @@
+use instant::{Duration, Instant};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
-use std::time::{Duration, Instant};
+
+#[cfg(target_arch = "wasm32")]
+mod web {
+    pub(super) use atomic_refcell::AtomicRefCell;
+    pub(super) use std::sync::{Arc, Weak};
+    pub(super) use wasm_bindgen::closure::Closure;
+    pub(super) use wasm_bindgen::JsCast;
+}
+#[cfg(target_arch = "wasm32")]
+use web::*;
 
 use super::super::config::WrapperConfig;
 use super::Backend;
@@ -13,6 +23,9 @@ use crate::wrapper::util::buffer_management::{BufferManager, ChannelPointers};
 pub struct Dummy {
     config: WrapperConfig,
     audio_io_layout: AudioIOLayout,
+
+    #[cfg(target_arch = "wasm32")]
+    closure: AtomicRefCell<Option<Arc<Closure<dyn FnMut()>>>>,
 }
 
 impl<P: Plugin> Backend<P> for Dummy {
@@ -96,14 +109,15 @@ impl<P: Plugin> Backend<P> for Dummy {
         // This queue will never actually be used
         let mut midi_output_events = Vec::with_capacity(1024);
         let mut num_processed_samples = 0usize;
-        loop {
+
+        let mut process = move |config: &WrapperConfig| {
             let period_start = Instant::now();
 
-            let mut transport = Transport::new(self.config.sample_rate);
+            let mut transport = Transport::new(config.sample_rate);
             transport.pos_samples = Some(num_processed_samples as i64);
-            transport.tempo = Some(self.config.tempo as f64);
-            transport.time_sig_numerator = Some(self.config.timesig_num as i32);
-            transport.time_sig_denominator = Some(self.config.timesig_denom as i32);
+            transport.tempo = Some(config.tempo as f64);
+            transport.time_sig_numerator = Some(config.timesig_num as i32);
+            transport.time_sig_denominator = Some(config.timesig_denom as i32);
             transport.playing = true;
 
             for channel in &mut main_io_storage {
@@ -167,13 +181,56 @@ impl<P: Plugin> Backend<P> for Dummy {
                 &[],
                 &mut midi_output_events,
             ) {
-                break;
+                return None;
             }
 
             num_processed_samples += num_samples;
 
             let period_end = Instant::now();
-            std::thread::sleep((period_start + interval).saturating_duration_since(period_end));
+            Some((period_start + interval).saturating_duration_since(period_end))
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            loop {
+                if let Some(delay) = process(&self.config) {
+                    wasm_thread::sleep(delay);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let config = self.config.clone();
+            let window = web_sys::window().unwrap();
+
+            let closure = Arc::new_cyclic({
+                let window = window.clone();
+
+                move |closure: &Weak<Closure<dyn FnMut()>>| {
+                    let closure = closure.clone();
+
+                    Closure::<dyn FnMut()>::new(move || {
+                        if let Some(delay) = process(&config) {
+                            window
+                                .set_interval_with_callback_and_timeout_and_arguments_0(
+                                    closure.upgrade().unwrap().as_ref().as_ref().unchecked_ref(),
+                                    delay.as_millis() as _,
+                                )
+                                .unwrap();
+                        }
+                    })
+                }
+            });
+            window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    closure.as_ref().as_ref().unchecked_ref(),
+                    0,
+                )
+                .unwrap();
+            *self.closure.borrow_mut() = Some(closure);
         }
     }
 }
@@ -183,6 +240,14 @@ impl Dummy {
         Self {
             audio_io_layout: config.audio_io_layout_or_exit::<P>(),
             config,
+
+            #[cfg(target_arch = "wasm32")]
+            closure: AtomicRefCell::new(None),
         }
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for Dummy {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for Dummy {}
