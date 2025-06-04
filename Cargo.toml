@@ -16,6 +16,7 @@ members = [
   "nih_plug_derive",
   "nih_plug_egui",
   "nih_plug_iced",
+  "nih_plug_slint",
   "nih_plug_vizia",
   "nih_plug_xtask",
 
@@ -29,6 +30,7 @@ members = [
   "plugins/examples/gain",
   "plugins/examples/gain_gui_egui",
   "plugins/examples/gain_gui_iced",
+  "plugins/examples/gain_gui_slint",
   "plugins/examples/gain_gui_vizia",
   "plugins/examples/midi_inverter",
   "plugins/examples/poly_mod_synth",

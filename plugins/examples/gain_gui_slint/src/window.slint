@@ -1,0 +1,427 @@
+component Slider inherits Rectangle {
+    in-out property <float> value;
+    in-out property <float> mod-offset;
+    in property <float> default-value;
+
+    changed value => {
+        input.text = value-text(value);
+    }
+
+    pure callback value-changed(value: float);
+    pure callback step(next: bool, finer: bool) -> float;
+    pure callback pressed();
+    pure callback released();
+
+    pure callback value-text(gain: float) -> string;
+    pure callback accepted(text: string) -> float;
+
+    states [
+        default when !touch.has-hover: {
+            background: transparent;
+
+            in {
+                animate background { duration: 100ms; }
+            }
+            out {
+                animate background { duration: 100ms; }
+            }
+        }
+        hover when touch.has-hover: {
+            background: rgba(128, 128, 128, 0.1);
+        }
+    ]
+
+    border-color: rgb(10, 10, 10);
+    border-width: 1px;
+    height: 30px;
+
+    Rectangle {
+        x: root.border-width;
+        y: root.border-width;
+        width: root.width - 2 * self.x;
+        height: root.height - 2 * self.y;
+        clip: true;
+
+        Rectangle {
+            pure function calc-x() -> length {
+                if mod-offset < 0 {
+                    if value < 0.5 {
+                        value-rect.x + mod-offset * parent.width
+                    } else {
+                        value-rect.x + value-rect.width + mod-offset * parent.width
+                    }
+                } else {
+                    if value < 0.5 {
+                        value-rect.x
+                    } else {
+                        value-rect.x + value-rect.width
+                    }
+                }
+            }
+
+            x: calc-x();
+            width: mod-offset.abs() * parent.width;
+            background: rgba(164, 234, 252, 0.41);
+        }
+
+        value-rect := Rectangle {
+            pure function calc-x() -> length {
+                if value < 0.5 {
+                    value * parent.width
+                } else {
+                    0.5 * parent.width
+                }
+            }
+
+            x: calc-x();
+            width: (value - 0.5).abs() * parent.width;
+            background: rgb(196, 196, 196);
+        }
+
+        input := TextInput {
+            text: value-text(value);
+            font-size: 14px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+
+            changed has-focus => {
+                touch.enabled = !self.has-focus;
+            }
+
+            accepted => {
+                value = accepted(self.text);
+                self.clear-focus();
+            }
+        }
+
+        touch := TouchArea {
+            property <length> scroll-delta;
+            property <bool> granular;
+            property <length> granular-start-x;
+            property <float> granular-start-value;
+            property <float> granular-drag-multiplier: 10;
+
+            function update-value() {
+                if granular {
+                    value = granular-start-value + (self.mouse-x - granular-start-x)
+                        / (granular-drag-multiplier * self.width);
+                } else {
+                    value = self.mouse-x / self.width;
+                }
+                value = value.clamp(0, 1);
+                value-changed(value);
+            }
+
+            changed has-hover => {
+                if self.has-hover {
+                    scroll-delta = 0px;
+                }
+            }
+
+            double-clicked => {
+                value = default-value;
+            }
+
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    if event.button != PointerEventButton.left {
+                        return;
+                    }
+
+                    if event.modifiers.alt {
+                        input.focus();
+                        input.select-all();
+                    } else if event.modifiers.meta {
+                        value = default-value;
+                    } else {
+                        pressed();
+                        update-value();
+                    }
+                }
+                else if event.kind == PointerEventKind.up {
+                    if event.button == PointerEventButton.left {
+                        released();
+                    }
+                } else if event.kind == PointerEventKind.move {
+                    if !self.pressed {
+                        return;
+                    }
+
+                    if event.modifiers.shift {
+                        if !granular {
+                            granular = true;
+                            granular-start-x = self.mouse-x;
+                            granular-start-value = value;
+                        }
+                    } else {
+                        granular = false;
+                    }
+                    update-value();
+                }
+            }
+
+            scroll-event(event) => {
+                scroll-delta += event.delta-y;
+                if scroll-delta <= -5px {
+                    scroll-delta = 0px;
+                    value = step(false, event.modifiers.shift);
+                } else if scroll-delta >= 5px {
+                    scroll-delta = 0px;
+                    value = step(true, event.modifiers.shift);
+                }
+                accept
+            }
+        }
+    }
+}
+
+struct PeakmeterValues {
+    db: float,
+    hold-db: float,
+}
+
+component Tick inherits Text {
+    font-size: 11px;
+    width: self.min-width;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+component Peakmeter inherits VerticalLayout {
+    in property <PeakmeterValues> values;
+    property <float> min-tick: -90;
+    property <float> max-tick: 20;
+    property <[float]> ticks: [-80, -60, -40, -20, 0];
+    property <length> tick-width: 1px;
+
+    pure function db-to-x(db: float) -> length {
+        ((db - min-tick) / (max-tick - min-tick) * self.width).clamp(-tick-width, self.width)
+    }
+
+    Rectangle {
+        property <int> num-ticks: (db-to-x(values.db) / (2 * tick-width)).floor();
+        property <int> max-ticks: (value-rect.width / (2 * tick-width)).floor();
+        property <float> remains: (max-ticks * 2 * tick-width - value-rect.width) / max-ticks / 1px;
+
+        height: 14px;
+        border-color: rgb(10, 10, 10);
+        border-width: 1px;
+
+        value-rect := Rectangle {
+            x: parent.border-width;
+            y: parent.border-width;
+            width: parent.width - 2 * self.x;
+            height: parent.height - 2 * self.y;
+
+            for tick in num-ticks: Rectangle {
+                property <float> grayscale: (0.3 + (0.5 * (1 - self.x / parent.width))) * 255;
+
+                x: (2 - remains) * self.width * tick;
+                width: tick-width;
+                background: rgb(grayscale, grayscale, grayscale);
+            }
+
+            Rectangle {
+                x: db-to-x(values.hold-db);
+                width: tick-width;
+                background: rgb(30%, 30%, 30%);
+            }
+        }
+    }
+
+    Rectangle {
+        pure function db-to-text(db: float) -> string {
+            if db == -80 {
+                "-inf"
+            } else {
+                db
+            }
+        }
+
+        for tick in ticks: VerticalLayout {
+            spacing: 1px;
+
+            legend-rect := Rectangle {
+                x: db-to-x(tick) - 0.5 * self.width;
+                width: tick-width;
+                height: 4px;
+                background: rgb(10, 10, 10);
+            }
+
+            HorizontalLayout {
+                x: legend-rect.x - 0.5 * text.min-width;
+                spacing: 2px;
+
+                text := Tick {
+                    text: db-to-text(tick);
+                }
+
+                if tick == 0: Tick {
+                    text: "dBFS";
+                }
+            }
+        }
+    }
+}
+
+component ResizeHandle inherits Rectangle {
+    callback begin();
+    callback moved(diff: length);
+
+    states [
+        a when !touch.has-hover: {
+            path.fill: rgba(105, 105, 105, 0.2);
+
+            in {
+                animate path.fill { duration: 100ms; }
+            }
+            out {
+                animate path.fill { duration: 100ms; }
+            }
+        }
+        b when touch.has-hover: {
+            path.fill: rgba(105, 105, 105, 0.8);
+        }
+    ]
+
+    width: 20px;
+    height: 20px;
+    
+    path := Path {
+        MoveTo {
+            x: 1.0;
+            y: 0.0;
+        }
+        
+        LineTo {
+            x: 1.0;
+            y: 1.0;
+        }
+
+        LineTo {
+            x: 0.0;
+            y: 1.0;
+        }
+        
+        Close {}
+    }
+
+    touch := TouchArea {
+        property <length> diff: 0;
+
+        moved => {
+            diff = diff + self.mouse-x - self.pressed-x;
+            moved(diff);
+        }
+
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                diff = 0;
+                begin();
+            }
+        }
+    }
+}
+
+export component GainWindow inherits Window {
+    in-out property <float> gain <=> slider.value;
+    in-out property <float> gain-mod-offset <=> slider.mod-offset;
+    in property <float> default-gain;
+    in-out property <float> scale-factor: 1;
+
+    pure callback gain-changed(gain: float);
+    pure callback gain-step(next: bool, finer: bool) -> float;
+    pure callback gain-pressed();
+    pure callback gain-released();
+    pure callback set_gain(gain: float);
+
+    pure callback gain-text(gain: float) -> string;
+    pure callback gain-accepted(text: string) -> float;
+
+    pure callback peakemter() -> PeakmeterValues;
+    pure callback set-scale-factor(factor: float);
+
+    background: rgb(250, 250, 250);
+    default-font-family: "Noto Sans";
+
+    FocusScope {}
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: start;
+
+        Text {
+            text: "Gain GUI";
+            font-size: 30px;
+            font-weight: 300;
+            height: 50px;
+            horizontal-alignment: center;
+            vertical-alignment: bottom;
+        }
+
+        Text {
+            text: "Gain";
+            font-size: 14px;
+            height: 20px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        slider := Slider {
+            default-value: default-gain;
+
+            value-changed(value) => {
+                gain-changed(value);
+            }
+            step(next, finer) => {
+                gain-step(next, finer)
+            }
+            pressed => {
+                gain-pressed();
+            }
+            released => {
+                gain-released();
+            }
+
+            value-text(gain) => {
+                gain-text(gain)
+            }
+            accepted(text) => {
+                gain-accepted(text)
+            }
+        }
+
+        VerticalLayout {
+            padding-top: 10px;
+
+            Peakmeter {
+                values: peakemter();
+
+                Timer {
+                    interval: 1s / 30;
+
+                    triggered => {
+                        parent.values = peakemter();
+                    }
+                }
+            }
+        }
+    }
+    
+    ResizeHandle {
+        property <float> pressed-scale-factor;
+
+        x: root.width - self.width;
+        y: root.height - self.height;
+
+        begin => {
+            pressed-scale-factor = scale-factor;
+        }
+
+        moved(diff) => {
+            scale-factor = pressed-scale-factor + diff / root.width;
+            set-scale-factor(scale-factor);
+        }
+    }
+}

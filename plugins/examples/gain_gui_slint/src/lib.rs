@@ -1,5 +1,5 @@
 use nih_plug::prelude::*;
-use nih_plug_iced::IcedState;
+use nih_plug_slint::SlintState;
 use std::sync::Arc;
 
 mod editor;
@@ -8,7 +8,7 @@ mod editor;
 const PEAK_METER_DECAY_MS: f64 = 150.0;
 
 /// This is mostly identical to the gain example, minus some fluff, and with a GUI.
-struct Gain {
+pub struct Gain {
     params: Arc<GainParams>,
 
     /// Needed to normalize the peak meter's response based on the sample rate.
@@ -26,10 +26,10 @@ struct GainParams {
     /// The editor state, saved together with the parameter state so the custom scaling can be
     /// restored.
     #[persist = "editor-state"]
-    editor_state: Arc<IcedState>,
+    editor_state: Arc<SlintState>,
 
     #[id = "gain"]
-    pub gain: FloatParam,
+    gain: FloatParam,
 }
 
 impl Default for Gain {
@@ -67,7 +67,7 @@ impl Default for GainParams {
 }
 
 impl Plugin for Gain {
-    const NAME: &'static str = "Gain GUI (iced)";
+    const NAME: &'static str = "Gain GUI (Slint)";
     const VENDOR: &'static str = "Moist Plugins GmbH";
     const URL: &'static str = "https://youtu.be/dQw4w9WgXcQ";
     const EMAIL: &'static str = "info@example.com";
@@ -160,7 +160,7 @@ impl Plugin for Gain {
 impl AuPlugin for Gain {}
 
 impl ClapPlugin for Gain {
-    const CLAP_ID: &'static str = "com.moist-plugins-gmbh.gain-gui-iced";
+    const CLAP_ID: &'static str = "com.moist-plugins-gmbh.gain-gui-slint";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A smoothed gain parameter example plugin");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -173,7 +173,7 @@ impl ClapPlugin for Gain {
 }
 
 impl Vst3Plugin for Gain {
-    const VST3_CLASS_ID: [u8; 16] = *b"GainGuiIcedAaAAa";
+    const VST3_CLASS_ID: [u8; 16] = *b"GainGuiSlintAAAA";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }

@@ -111,6 +111,13 @@ au_manufacturer_short = "MPGM"
 au_type = "aufx"
 au_subtype = "GGIC"
 
+[gain_gui_slint]
+name = "Gain GUI (Slint)"
+au_manufacturer = "Moist Plugins GmbH"
+au_manufacturer_short = "MPGM"
+au_type = "aufx"
+au_subtype = "GGSL"
+
 [gain_gui_vizia]
 name = "Gain GUI (VIZIA)"
 au_manufacturer = "Moist Plugins GmbH"

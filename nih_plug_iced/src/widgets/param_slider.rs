@@ -329,8 +329,8 @@ impl<'a, P: Param> Widget<ParamMessage, Renderer> for ParamSlider<'a, P> {
             )
         } else {
             // We'll visualize the difference between the current value and the default value if the
-            // default value lies somewhere in the middle and the parameter is continuous. Otherwise
-            // this appraoch looks a bit jarring.
+            // default value lies somewhere in the middle and the parameter is continuous.
+            // Otherwise, this approach looks a bit jarring.
             let current_value = self.param.modulated_normalized_value();
             let default_value = self.param.default_normalized_value();
             let fill_start_x = util::remap_rect_x_t(
