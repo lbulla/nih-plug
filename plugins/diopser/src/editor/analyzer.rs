@@ -49,7 +49,7 @@ impl SpectrumAnalyzer {
         spectrum: LSpectrum,
         sample_rate: LRate,
         x_renormalize_display: impl Fn(f32) -> f32 + Clone + 'static,
-    ) -> Handle<Self>
+    ) -> Handle<'_, Self>
     where
         LSpectrum: Lens<Target = Arc<Mutex<SpectrumOutput>>>,
         LRate: Lens<Target = Arc<AtomicF32>>,

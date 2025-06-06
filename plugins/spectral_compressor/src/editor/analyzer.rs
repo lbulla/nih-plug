@@ -62,7 +62,7 @@ impl Analyzer {
         cx: &mut Context,
         analyzer_data: LAnalyzerData,
         sample_rate: LRate,
-    ) -> Handle<Self>
+    ) -> Handle<'_, Self>
     where
         LAnalyzerData: Lens<Target = Arc<Mutex<triple_buffer::Output<AnalyzerData>>>>,
         LRate: Lens<Target = Arc<AtomicF32>>,

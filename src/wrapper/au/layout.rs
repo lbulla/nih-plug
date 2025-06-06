@@ -172,7 +172,7 @@ impl<T, const N: usize> ConstVec<T, N> {
         self.len += 1;
     }
 
-    pub fn iter(&self) -> ConstVecIter<T, N> {
+    pub fn iter(&self) -> ConstVecIter<'_, T, N> {
         ConstVecIter { vec: self, idx: 0 }
     }
 }

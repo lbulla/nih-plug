@@ -593,7 +593,7 @@ impl<P: AuPlugin> Wrapper<P> {
         }
     }
 
-    fn make_init_context(&self) -> WrapperInitContext<P> {
+    fn make_init_context(&self) -> WrapperInitContext<'_, P> {
         WrapperInitContext { wrapper: self }
     }
 
@@ -851,7 +851,7 @@ impl<P: AuPlugin> Wrapper<P> {
 
     // ---------- Parameters ---------- //
 
-    pub(super) fn param_hashes(&self) -> Keys<u32, WrapperParam> {
+    pub(super) fn param_hashes(&self) -> Keys<'_, u32, WrapperParam> {
         self.param_hash_to_param.keys()
     }
 
@@ -1308,7 +1308,7 @@ impl<P: AuPlugin> Wrapper<P> {
         *self.host_callback_info.borrow_mut() = Some(AuHostCallbackInfo::new(info));
     }
 
-    fn make_process_context(&self, sample_rate: f32) -> WrapperProcessContext<P> {
+    fn make_process_context(&self, sample_rate: f32) -> WrapperProcessContext<'_, P> {
         let mut transport = Transport::new(sample_rate);
         if let Some(info) = self
             .host_callback_info

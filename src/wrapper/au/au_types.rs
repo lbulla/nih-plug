@@ -169,14 +169,14 @@ impl AuBufferList {
         self.list
     }
 
-    pub(super) fn iter(&self) -> AuBufferListIter {
+    pub(super) fn iter(&self) -> AuBufferListIter<'_> {
         AuBufferListIter {
             buffer_list: self,
             index: 0,
         }
     }
 
-    pub(super) fn iter_mut(&self) -> AuBufferListIterMut {
+    pub(super) fn iter_mut(&self) -> AuBufferListIterMut<'_> {
         AuBufferListIterMut {
             buffer_list: self,
             index: 0,

@@ -111,7 +111,7 @@ impl XyPad {
         params_to_y_param: FMap2,
         x_renormalize_display: impl Fn(f32) -> f32 + Clone + 'static,
         x_renormalize_event: impl Fn(f32) -> f32 + 'static,
-    ) -> Handle<Self>
+    ) -> Handle<'_, Self>
     where
         L: Lens<Target = Params> + Clone,
         Params: 'static,
@@ -379,7 +379,7 @@ impl XyPad {
 }
 
 impl XyPadHandle {
-    fn new(cx: &mut Context) -> Handle<Self> {
+    fn new(cx: &mut Context) -> Handle<'_, Self> {
         // This doesn't have or need any special behavior, it's just a marker element used for
         // positioning he handle
         Self.build(cx, |_| ())

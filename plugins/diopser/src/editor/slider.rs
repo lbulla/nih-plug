@@ -82,7 +82,7 @@ impl RestrictedParamSlider {
         params_to_param: FMap,
         renormalize_display: impl Fn(f32) -> f32 + Clone + 'static,
         renormalize_event: impl Fn(f32) -> f32 + 'static,
-    ) -> Handle<Self>
+    ) -> Handle<'_, Self>
     where
         L: Lens<Target = Params> + Clone,
         Params: 'static,

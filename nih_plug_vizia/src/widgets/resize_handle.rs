@@ -25,7 +25,7 @@ pub struct ResizeHandle {
 impl ResizeHandle {
     /// Create a resize handle at the bottom right of the window. This should be created at the top
     /// level. Dragging this handle around will cause the window to be resized.
-    pub fn new(cx: &mut Context) -> Handle<Self> {
+    pub fn new(cx: &mut Context) -> Handle<'_, Self> {
         // Styling is done in the style sheet
         ResizeHandle {
             drag_active: false,
