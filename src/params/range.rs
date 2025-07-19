@@ -46,6 +46,14 @@ impl<S: Sample> FloatRange<S> {
         S::TWO.powf(factor)
     }
 
+    /// Calculate a skew factor for [`FloatRange::Skewed`] that a normalized value of 0.5 resolves
+    /// to the middle of the range.
+    pub fn skew_middle(min: S, middle: S, max: S) -> S {
+        nih_debug_assert!(min < max);
+        nih_debug_assert!(min < middle && middle < max);
+        S::HALF.log((middle - min) / (max - min))
+    }
+
     /// Calculate a skew factor for [`FloatRange::Skewed`] that makes a linear gain parameter range
     /// appear as if it was linear when formatted as decibels.
     pub fn gain_skew_factor(min_db: S, max_db: S) -> S {
@@ -55,10 +63,7 @@ impl<S: Sample> FloatRange<S> {
         let max_gain = util::db_to_gain(max_db);
         let middle_db = (max_db + min_db) * S::HALF;
         let middle_gain = util::db_to_gain(middle_db);
-
-        // Check the Skewed equation in the normalized function below, we need to solve the factor
-        // such that the a normalized value of 0.5 resolves to the middle of the range
-        S::HALF.log((middle_gain - min_gain) / (max_gain - min_gain))
+        Self::skew_middle(min_gain, middle_gain, max_gain)
     }
 
     /// Normalize a plain, unnormalized value. Will be clamped to the bounds of the range if the
