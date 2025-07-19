@@ -39,7 +39,7 @@ pub struct SpectrumAnalyzer {
     /// The same range as that used by the filter frequency parameter. We'll use this to make sure
     /// we draw the spectrum analyzer's ticks at locations that match the frequency parameter linked
     /// to the X-Y pad's X-axis.
-    frequency_range: FloatRange,
+    frequency_range: FloatRange<f32>,
 }
 
 impl SpectrumAnalyzer {

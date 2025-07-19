@@ -73,11 +73,11 @@ pub(crate) use sealed::Sealed;
 /// abstractions around parameters, consider wrapping them in a struct instead. Then use the
 /// `#[nested(id_prefix = "foo")]` syntax from the [`Params`] trait to reuse that wrapper in
 /// multiple places.
-pub trait Param: Display + Debug + sealed::Sealed {
+pub trait Param: Display + Debug + Sealed {
     /// The plain parameter type.
     type Plain: PartialEq;
 
-    /// Get the human readable name for this parameter.
+    /// Get the human-readable name for this parameter.
     fn name(&self) -> &str;
 
     /// Get the unit label for this parameter, if any.

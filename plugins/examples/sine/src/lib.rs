@@ -20,7 +20,7 @@ pub struct Sine {
     ///
     /// Smoothing is built into the parameters, but you can also use them manually if you need to
     /// smooth soemthing that isn't a parameter.
-    midi_note_gain: Smoother<f32>,
+    midi_note_gain: Smoother<f32, f32>,
 }
 
 #[derive(Params)]
@@ -169,7 +169,7 @@ impl Plugin for Sine {
                     match event {
                         NoteEvent::NoteOn { note, velocity, .. } => {
                             self.midi_note_id = note;
-                            self.midi_note_freq = util::midi_note_to_freq(note);
+                            self.midi_note_freq = util::midi_note_to_freq::<f32>(note);
                             self.midi_note_gain.set_target(self.sample_rate, velocity);
                         }
                         NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {

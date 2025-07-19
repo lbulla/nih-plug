@@ -51,7 +51,7 @@ struct Voice {
     /// devided by `100/127` such that MIDI velocity 100 corresponds to 1.0 gain.
     velocity_gain: f32,
     /// The gain from the gain note expression.
-    gain_expression_gain: Smoother<f32>,
+    gain_expression_gain: Smoother<f32, f32>,
     /// The envelope genrator used during playback. Produces a `[0, 1]` result.
     amp_envelope: envelope::AREnvelope,
 }
@@ -120,13 +120,13 @@ impl Default for BuffrGlitchParams {
                 FloatRange::Skewed {
                     min: 0.0,
                     max: 1.0,
-                    factor: FloatRange::gain_skew_factor(util::MINUS_INFINITY_DB, 0.0),
+                    factor: FloatRange::gain_skew_factor(<f32 as Sample>::MINUS_INFINITY_DB, 0.0),
                 },
             )
             .with_smoother(SmoothingStyle::Exponential(10.0))
             .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(1))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             velocity_sensitive: BoolParam::new("Velocity Sensitive", false),
             octave_shift: IntParam::new(
                 "Octave Shift",
@@ -412,7 +412,7 @@ impl Voice {
         // that was just played. The octave shift parameter makes it possible to get
         // larger window sizes.
         let note_frequency =
-            util::midi_note_to_freq(midi_note_id) * 2.0f32.powi(params.octave_shift.value());
+            util::midi_note_to_freq::<f32>(midi_note_id) * 2.0f32.powi(params.octave_shift.value());
         self.buffer
             .prepare_playback(note_frequency, params.crossfade_ms.value());
     }

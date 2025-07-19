@@ -53,7 +53,7 @@ pub struct Diopser {
     /// When the bypass parameter is toggled, this smoother fades between 0.0 and 1.0. This lets us
     /// crossfade the dry and the wet signal to avoid clicks. The smoothing target is set in a
     /// callback handler on the bypass parameter.
-    bypass_smoother: Arc<Smoother<f32>>,
+    bypass_smoother: Arc<Smoother<f32, f32>>,
 
     /// If this is set at the start of the processing cycle, then the filter coefficients should be
     /// updated. For the regular filter parameters we can look at the smoothers, but this is needed

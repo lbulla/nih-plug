@@ -896,7 +896,7 @@ impl CompressorBank {
                 unsafe { self.upwards_knee_parabola_intercept.get_unchecked(bin_idx) };
             let upwards_compressed = if bin_idx >= first_non_dc_bin
                 && *upwards_ratio != 1.0
-                && envelope_db > util::MINUS_INFINITY_DB
+                && envelope_db > <f32 as Sample>::MINUS_INFINITY_DB
             {
                 compress_upwards(
                     envelope_db,
@@ -985,7 +985,7 @@ impl CompressorBank {
             // Notice how the threshold and knee values are scaled here
             let downwards_threshold_db =
                 unsafe { self.downwards_thresholds_db.get_unchecked(bin_idx) + sidechain_scale_db }
-                    .max(util::MINUS_INFINITY_DB);
+                    .max(<f32 as Sample>::MINUS_INFINITY_DB);
             let downwards_ratio = unsafe { self.downwards_ratios.get_unchecked(bin_idx) };
             // Because the thresholds are scaled based on the sidechain input, we also need to
             // recompute the knee coefficients
@@ -1006,11 +1006,11 @@ impl CompressorBank {
 
             let upwards_threshold_db =
                 unsafe { self.upwards_thresholds_db.get_unchecked(bin_idx) + sidechain_scale_db }
-                    .max(util::MINUS_INFINITY_DB);
+                    .max(<f32 as Sample>::MINUS_INFINITY_DB);
             let upwards_ratio = unsafe { self.upwards_ratios.get_unchecked(bin_idx) };
             let upwards_compressed = if bin_idx >= first_non_dc_bin
                 && *upwards_ratio != 1.0
-                && envelope_db > util::MINUS_INFINITY_DB
+                && envelope_db > <f32 as Sample>::MINUS_INFINITY_DB
             {
                 let (upwards_knee_parabola_scale, upwards_knee_parabola_intercept) =
                     upwards_soft_knee_coefficients(

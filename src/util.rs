@@ -3,10 +3,9 @@
 mod stft;
 pub mod window;
 
+use crate::sample::Sample;
 pub use stft::StftHelper;
 
-pub const MINUS_INFINITY_DB: f32 = -100.0;
-pub const MINUS_INFINITY_GAIN: f32 = 1e-5; // 10f32.powf(MINUS_INFINITY_DB / 20)
 pub const NOTES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
@@ -27,79 +26,76 @@ pub fn permit_alloc<T, F: FnOnce() -> T>(func: F) -> T {
 
 /// Convert decibels to a voltage gain ratio, treating anything below -100 dB as minus infinity.
 #[inline]
-pub fn db_to_gain(dbs: f32) -> f32 {
-    if dbs > MINUS_INFINITY_DB {
-        10.0f32.powf(dbs * 0.05)
+pub fn db_to_gain<S: Sample>(dbs: S) -> S {
+    if dbs > S::MINUS_INFINITY_DB {
+        S::from_p(10).powf(dbs * S::from_p(0.05))
     } else {
-        0.0
+        S::ZERO
     }
 }
 
 /// Convert a voltage gain ratio to decibels. Gain ratios that aren't positive will be treated as
 /// [`MINUS_INFINITY_DB`].
 #[inline]
-pub fn gain_to_db(gain: f32) -> f32 {
-    f32::max(gain, MINUS_INFINITY_GAIN).log10() * 20.0
+pub fn gain_to_db<S: Sample>(gain: S) -> S {
+    S::max(gain, S::MINUS_INFINITY_GAIN).log10() * S::from_p(20)
 }
 
 /// An approximation of [`db_to_gain()`] using `exp()`. Does not treat values below
-/// [`MINUS_INFINITY_DB`] as 0.0 gain to avoid branching. As a result this function will thus also
+/// [`MINUS_INFINITY_DB`] as 0.0 gain to avoid branching. As a result, this function will thus also
 /// never return 0.0 for normal input values. Will run faster on most architectures, but the result
 /// may be slightly different.
 #[inline]
-pub fn db_to_gain_fast(dbs: f32) -> f32 {
-    const CONVERSION_FACTOR: f32 = std::f32::consts::LN_10 / 20.0;
-    (dbs * CONVERSION_FACTOR).exp()
+pub fn db_to_gain_fast<S: Sample>(dbs: S) -> S {
+    (dbs * S::CONVERSION_FACTOR_DB_GAIN).exp()
 }
 
 /// [`db_to_gain_fast()`], but this version does truncate values below [`MINUS_INFINITY_DB`] to 0.0.
 /// Bikeshedding over a better name is welcome.
 #[inline]
-pub fn db_to_gain_fast_branching(dbs: f32) -> f32 {
-    if dbs > MINUS_INFINITY_DB {
+pub fn db_to_gain_fast_branching<S: Sample>(dbs: S) -> S {
+    if dbs > S::MINUS_INFINITY_DB {
         db_to_gain_fast(dbs)
     } else {
-        0.0
+        S::ZERO
     }
 }
 
 /// An approximation of [`gain_to_db()`] using `ln()`. Will run faster on most architectures, but
 /// the result may be slightly different.
 #[inline]
-pub fn gain_to_db_fast(gain: f32) -> f32 {
-    const CONVERSION_FACTOR: f32 = std::f32::consts::LOG10_E * 20.0;
-    f32::max(gain, MINUS_INFINITY_GAIN).ln() * CONVERSION_FACTOR
+pub fn gain_to_db_fast<S: Sample>(gain: S) -> S {
+    S::max(gain, S::MINUS_INFINITY_DB).ln() * S::CONVERSION_FACTOR_GAIN_DB
 }
 
 /// [`db_to_gain_fast()`], but the minimum gain value is set to [`f32::EPSILON`]instead of
 /// [`MINUS_INFINITY_GAIN`]. Useful in conjunction with [`db_to_gain_fast()`].
 #[inline]
-pub fn gain_to_db_fast_epsilon(gain: f32) -> f32 {
-    const CONVERSION_FACTOR: f32 = std::f32::consts::LOG10_E * 20.0;
-    f32::max(gain, MINUS_INFINITY_GAIN).ln() * CONVERSION_FACTOR
+pub fn gain_to_db_fast_epsilon<S: Sample>(gain: S) -> S {
+    S::max(gain, S::EPSILON).ln() * S::CONVERSION_FACTOR_GAIN_DB
 }
 
 /// Convert a MIDI note ID to a frequency at A4 = 440 Hz equal temperament and middle C = note 60 =
 /// C4.
 #[inline]
-pub fn midi_note_to_freq(note: u8) -> f32 {
-    f32_midi_note_to_freq(note as f32)
+pub fn midi_note_to_freq<S: Sample>(note: u8) -> S {
+    sample_midi_note_to_freq(S::from_p(note))
 }
 
 /// The same as [`midi_note_to_freq()`], but for arbitrary note numbers including those outside of
 /// the MIDI range. This also supports fractional note numbers, which is useful when working with
 /// cents.
 #[inline]
-pub fn f32_midi_note_to_freq(note: f32) -> f32 {
-    2.0f32.powf((note - 69.0) / 12.0) * 440.0
+pub fn sample_midi_note_to_freq<S: Sample>(note: S) -> S {
+    S::TWO.powf((note - S::from_p(69)) / S::from_p(12)) * S::from_p(440)
 }
 
-/// The inverse of [`f32_midi_note_to_freq()`]. This returns a fractional note number. Round to a
+/// The inverse of [`sample_midi_note_to_freq()`]. This returns a fractional note number. Round to a
 /// whole number, subtract that from the result, and multiply the fractional part by 100 to get the
 /// number of cents.
 #[inline]
-pub fn freq_to_midi_note(freq: f32) -> f32 {
-    ((freq / 440.0).log2() * 12.0) + 69.0
+pub fn freq_to_midi_note<S: Sample>(freq: S) -> S {
+    ((freq / S::from_p(440)).log2() * S::from_p(12)) + S::from_p(69)
 }
 
 #[cfg(test)]

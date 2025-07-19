@@ -32,7 +32,7 @@ pub const FILTER_STAGES_RESTRICTED_MIN: i32 = 0;
 pub const FILTER_STAGES_RESTRICTED_MAX: i32 = 40;
 
 /// The filter frequency parameter's range. Also used in the `SpectrumAnalyzer` widget.
-pub fn filter_frequency_range() -> FloatRange {
+pub fn filter_frequency_range() -> FloatRange<f32> {
     FloatRange::Skewed {
         min: 5.0, // This must never reach 0
         max: 20_000.0,
@@ -118,7 +118,7 @@ impl DiopserParams {
     pub fn new(
         sample_rate: Arc<AtomicF32>,
         should_update_filters: Arc<AtomicBool>,
-        bypass_smoother: Arc<Smoother<f32>>,
+        bypass_smoother: Arc<Smoother<f32, f32>>,
     ) -> Self {
         Self {
             editor_state: crate::editor::default_state(),

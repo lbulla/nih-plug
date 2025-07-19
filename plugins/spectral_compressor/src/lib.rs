@@ -205,8 +205,8 @@ impl Default for GlobalParams {
                 },
             )
             .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             // auto_makeup_gain: BoolParam::new("Auto Makeup Gain", true),
             dry_wet_ratio: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")

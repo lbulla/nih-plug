@@ -31,7 +31,7 @@ pub struct IntParam {
     default: i32,
     /// An optional smoother that will automatically interpolate between the new automation values
     /// set by the host.
-    pub smoothed: Smoother<i32>,
+    pub smoothed: Smoother<i32, f32>,
 
     /// Flags to control the parameter's behavior. See [`ParamFlags`].
     flags: ParamFlags,
@@ -304,7 +304,7 @@ impl IntParam {
 
     /// Set up a smoother that can gradually interpolate changes made to this parameter, preventing
     /// clicks and zipper noises.
-    pub fn with_smoother(mut self, style: SmoothingStyle) -> Self {
+    pub fn with_smoother(mut self, style: SmoothingStyle<f32>) -> Self {
         // Logarithmic smoothing will cause problems if the range goes through zero since then you
         // end up multiplying by zero
         let goes_through_zero = match (&style, &self.range) {

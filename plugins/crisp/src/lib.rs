@@ -286,8 +286,8 @@ impl Default for CrispParams {
             )
             .with_smoother(SmoothingStyle::Logarithmic(10.0))
             .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             wet_only: BoolParam::new("Wet Only", false),
         }
     }

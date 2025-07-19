@@ -143,7 +143,7 @@ struct ScheduleParamRamp {
     duration: au_sys::UInt32,
     start_value: f32,
     end_value: f32,
-    backup_smoothing_style: SmoothingStyle,
+    backup_smoothing_style: SmoothingStyle<f32>,
 }
 
 // TODO: `SmoothingStyle` with samples rather than ms.

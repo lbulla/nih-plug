@@ -1,29 +1,30 @@
 //! Different ranges for numeric parameters.
 
+use crate::sample::Sample;
 use crate::util;
 
 /// A distribution for a floating point parameter's range. All range endpoints are inclusive.
 #[derive(Debug, Clone, Copy)]
-pub enum FloatRange {
+pub enum FloatRange<S: Sample> {
     /// The values are uniformly distributed between `min` and `max`.
-    Linear { min: f32, max: f32 },
+    Linear { min: S, max: S },
     /// The range is skewed by a factor. Values above 1.0 will make the end of the range wider,
     /// while values between 0 and 1 will skew the range towards the start. Use
     /// [`FloatRange::skew_factor()`] for a more intuitively way to calculate the skew factor where
     /// positive values skew the range towards the end while negative values skew the range toward
     /// the start.
-    Skewed { min: f32, max: f32, factor: f32 },
+    Skewed { min: S, max: S, factor: S },
     /// The same as [`FloatRange::Skewed`], but with the skewing happening from a central point.
     /// This central point is rescaled to be at 50% of the parameter's range for convenience of use.
     /// Git blame this comment to find a version that doesn't do this.
     SymmetricalSkewed {
-        min: f32,
-        max: f32,
-        factor: f32,
-        center: f32,
+        min: S,
+        max: S,
+        factor: S,
+        center: S,
     },
     /// A reversed range that goes from high to low instead of from low to high.
-    Reversed(&'static FloatRange),
+    Reversed(&'static FloatRange<S>),
 }
 
 /// A distribution for an integer parameter's range. All range endpoints are inclusive. Only linear
@@ -37,36 +38,36 @@ pub enum IntRange {
     Reversed(&'static IntRange),
 }
 
-impl FloatRange {
+impl<S: Sample> FloatRange<S> {
     /// Calculate a skew factor for [`FloatRange::Skewed`] and [`FloatRange::SymmetricalSkewed`].
     /// Positive values make the end of the range wider while negative make the start of the range
     /// wider.
-    pub fn skew_factor(factor: f32) -> f32 {
-        2.0f32.powf(factor)
+    pub fn skew_factor(factor: S) -> S {
+        S::TWO.powf(factor)
     }
 
     /// Calculate a skew factor for [`FloatRange::Skewed`] that makes a linear gain parameter range
     /// appear as if it was linear when formatted as decibels.
-    pub fn gain_skew_factor(min_db: f32, max_db: f32) -> f32 {
+    pub fn gain_skew_factor(min_db: S, max_db: S) -> S {
         nih_debug_assert!(min_db < max_db);
 
         let min_gain = util::db_to_gain(min_db);
         let max_gain = util::db_to_gain(max_db);
-        let middle_db = (max_db + min_db) / 2.0;
+        let middle_db = (max_db + min_db) * S::HALF;
         let middle_gain = util::db_to_gain(middle_db);
 
         // Check the Skewed equation in the normalized function below, we need to solve the factor
         // such that the a normalized value of 0.5 resolves to the middle of the range
-        0.5f32.log((middle_gain - min_gain) / (max_gain - min_gain))
+        S::HALF.log((middle_gain - min_gain) / (max_gain - min_gain))
     }
 
     /// Normalize a plain, unnormalized value. Will be clamped to the bounds of the range if the
     /// normalized value exceeds `[0, 1]`.
-    pub fn normalize(&self, plain: f32) -> f32 {
+    pub fn normalize(&self, plain: S) -> S {
         match self {
-            FloatRange::Linear { min, max } => (plain.clamp(*min, *max) - min) / (max - min),
+            FloatRange::Linear { min, max } => (plain.clamp(*min, *max) - *min) / (*max - *min),
             FloatRange::Skewed { min, max, factor } => {
-                ((plain.clamp(*min, *max) - min) / (max - min)).powf(*factor)
+                ((plain.clamp(*min, *max) - *min) / (*max - *min)).powf(*factor)
             }
             FloatRange::SymmetricalSkewed {
                 min,
@@ -76,36 +77,36 @@ impl FloatRange {
             } => {
                 // There's probably a much faster equivalent way to write this. Also, I have no clue
                 // how I managed to implement this correctly on the first try.
-                let unscaled_proportion = (plain.clamp(*min, *max) - min) / (max - min);
-                let center_proportion = (center - min) / (max - min);
+                let unscaled_proportion = (plain.clamp(*min, *max) - *min) / (*max - *min);
+                let center_proportion = (*center - *min) / (*max - *min);
                 if unscaled_proportion > center_proportion {
                     // The part above the center gets normalized to a [0, 1] range, skewed, and then
                     // unnormalized and scaled back to the original [center_proportion, 1] range
                     let scaled_proportion = (unscaled_proportion - center_proportion)
-                        * (1.0 - center_proportion).recip();
-                    (scaled_proportion.powf(*factor) * 0.5) + 0.5
+                        * (S::ONE - center_proportion).recip();
+                    (scaled_proportion.powf(*factor) * S::HALF) + S::HALF
                 } else {
                     // The part below the center gets scaled, inverted (so the range is [0, 1] where
                     // 0 corresponds to the center proportion and 1 corresponds to the original
                     // normalized 0 value), skewed, inverted back again, and then scaled back to the
                     // original range
                     let inverted_scaled_proportion =
-                        (center_proportion - unscaled_proportion) * (center_proportion).recip();
-                    (1.0 - inverted_scaled_proportion.powf(*factor)) * 0.5
+                        (center_proportion - unscaled_proportion) * center_proportion.recip();
+                    (S::ONE - inverted_scaled_proportion.powf(*factor)) * S::HALF
                 }
             }
-            FloatRange::Reversed(range) => 1.0 - range.normalize(plain),
+            FloatRange::Reversed(range) => S::ONE - range.normalize(plain),
         }
     }
 
     /// Unnormalize a normalized value. Will be clamped to `[0, 1]` if the plain, unnormalized value
     /// would exceed that range.
-    pub fn unnormalize(&self, normalized: f32) -> f32 {
-        let normalized = normalized.clamp(0.0, 1.0);
+    pub fn unnormalize(&self, normalized: S) -> S {
+        let normalized = normalized.clamp_0_1();
         match self {
-            FloatRange::Linear { min, max } => (normalized * (max - min)) + min,
+            FloatRange::Linear { min, max } => (normalized * (*max - *min)) + *min,
             FloatRange::Skewed { min, max, factor } => {
-                (normalized.powf(factor.recip()) * (max - min)) + min
+                (normalized.powf(factor.recip()) * (*max - *min)) + *min
             }
             FloatRange::SymmetricalSkewed {
                 min,
@@ -114,26 +115,26 @@ impl FloatRange {
                 center,
             } => {
                 // Reconstructing the subranges works the same as with the normal skewed ranges
-                let center_proportion = (center - min) / (max - min);
-                let skewed_proportion = if normalized > 0.5 {
-                    let scaled_proportion = (normalized - 0.5) * 2.0;
-                    (scaled_proportion.powf(factor.recip()) * (1.0 - center_proportion))
+                let center_proportion = (*center - *min) / (*max - *min);
+                let skewed_proportion = if normalized > S::HALF {
+                    let scaled_proportion = (normalized - S::HALF) * S::TWO;
+                    (scaled_proportion.powf(factor.recip()) * (S::ONE - center_proportion))
                         + center_proportion
                 } else {
-                    let inverted_scaled_proportion = (0.5 - normalized) * 2.0;
-                    (1.0 - inverted_scaled_proportion.powf(factor.recip())) * center_proportion
+                    let inverted_scaled_proportion = (S::HALF - normalized) * S::TWO;
+                    (S::ONE - inverted_scaled_proportion.powf(factor.recip())) * center_proportion
                 };
 
-                (skewed_proportion * (max - min)) + min
+                (skewed_proportion * (*max - *min)) + *min
             }
-            FloatRange::Reversed(range) => range.unnormalize(1.0 - normalized),
+            FloatRange::Reversed(range) => range.unnormalize(S::ONE - normalized),
         }
     }
 
     /// The range's previous discrete step from a certain value with a certain step size. If the
     /// step size is not set, then the normalized range is split into 50 segments instead. If
     /// `finer` is true, then this is upped to 200 segments.
-    pub fn previous_step(&self, from: f32, step_size: Option<f32>, finer: bool) -> f32 {
+    pub fn previous_step(&self, from: S, step_size: Option<S>, finer: bool) -> S {
         // This one's slightly more involved than the integer version. We'll split the normalized
         // range up into 50 segments, but if `self.step_size` would cause the range to be devided
         // into less than 50 segments then we'll use that.
@@ -141,7 +142,11 @@ impl FloatRange {
             FloatRange::Linear { min, max }
             | FloatRange::Skewed { min, max, .. }
             | FloatRange::SymmetricalSkewed { min, max, .. } => {
-                let normalized_naive_step_size = if finer { 0.005 } else { 0.02 };
+                let normalized_naive_step_size = if finer {
+                    S::from_p(0.005)
+                } else {
+                    S::from_p(0.02)
+                };
                 let naive_step =
                     self.unnormalize(self.normalize(from) - normalized_naive_step_size);
 
@@ -161,13 +166,17 @@ impl FloatRange {
 
     /// The range's next discrete step from a certain value with a certain step size. If the step
     /// size is not set, then the normalized range is split into 100 segments instead.
-    pub fn next_step(&self, from: f32, step_size: Option<f32>, finer: bool) -> f32 {
+    pub fn next_step(&self, from: S, step_size: Option<S>, finer: bool) -> S {
         // See above
         match self {
             FloatRange::Linear { min, max }
             | FloatRange::Skewed { min, max, .. }
             | FloatRange::SymmetricalSkewed { min, max, .. } => {
-                let normalized_naive_step_size = if finer { 0.005 } else { 0.02 };
+                let normalized_naive_step_size = if finer {
+                    S::from_p(0.005)
+                } else {
+                    S::from_p(0.02)
+                };
                 let naive_step =
                     self.unnormalize(self.normalize(from) + normalized_naive_step_size);
 
@@ -185,7 +194,7 @@ impl FloatRange {
     }
 
     /// Snap a value to a step size, clamping to the minimum and maximum value of the range.
-    pub fn snap_to_step(&self, value: f32, step_size: f32) -> f32 {
+    pub fn snap_to_step(&self, value: S, step_size: S) -> S {
         match self {
             FloatRange::Linear { min, max }
             | FloatRange::Skewed { min, max, .. }
@@ -193,6 +202,15 @@ impl FloatRange {
                 ((value / step_size).round() * step_size).clamp(*min, *max)
             }
             FloatRange::Reversed(range) => range.snap_to_step(value, step_size),
+        }
+    }
+
+    pub fn clamp(&self, value: S) -> S {
+        match self {
+            FloatRange::Linear { min, max }
+            | FloatRange::Skewed { min, max, .. }
+            | FloatRange::SymmetricalSkewed { min, max, .. } => value.clamp(*min, *max),
+            FloatRange::Reversed(range) => range.clamp(value),
         }
     }
 

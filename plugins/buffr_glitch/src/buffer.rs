@@ -66,7 +66,7 @@ impl RingBuffer {
 
         // NOTE: We need to take the octave shift into account
         let lowest_note_frequency =
-            util::midi_note_to_freq(0) / 2.0f32.powi(MAX_OCTAVE_SHIFT as i32);
+            util::midi_note_to_freq::<f32>(0) / 2.0f32.powi(MAX_OCTAVE_SHIFT as i32);
         let loest_note_period_samples =
             (lowest_note_frequency.recip() * sample_rate).ceil() as usize;
         let buffer_len = loest_note_period_samples.next_power_of_two();

@@ -45,7 +45,7 @@ impl Default for Gain {
             params: Arc::new(GainParams::default()),
 
             peak_meter_decay_weight: 1.0,
-            peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
+            peak_meter: Arc::new(AtomicF32::new(<f32 as Sample>::MINUS_INFINITY_DB)),
         }
     }
 }
@@ -67,8 +67,8 @@ impl Default for GainParams {
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
             .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             some_int: IntParam::new("Something", 3, IntRange::Linear { min: 0, max: 3 }),
         }
     }
@@ -128,8 +128,9 @@ impl Plugin for Gain {
                         ui.add(widgets::ParamSlider::for_param(&params.gain, setter));
 
                         ui.label(
-                        "Also gain, but with a lame widget. Can't even render the value correctly!",
-                    );
+                            "Also gain, but with a lame widget. Can't even render the value \
+                             correctly!",
+                        );
                         // This is a simple naieve version of a parameter slider that's not aware of how
                         // the parameters work
                         ui.add(
@@ -153,7 +154,7 @@ impl Plugin for Gain {
                         // TODO: Add a proper custom widget instead of reusing a progress bar
                         let peak_meter =
                             util::gain_to_db(peak_meter.load(std::sync::atomic::Ordering::Relaxed));
-                        let peak_meter_text = if peak_meter > util::MINUS_INFINITY_DB {
+                        let peak_meter_text = if peak_meter > <f32 as Sample>::MINUS_INFINITY_DB {
                             format!("{peak_meter:.1} dBFS")
                         } else {
                             String::from("-inf dBFS")

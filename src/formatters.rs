@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use crate::sample::Sample;
 use crate::util;
 
 // TODO: The v2s and s2v naming convention isn't ideal, but at least it's unambiguous. Is there a
@@ -82,16 +83,16 @@ pub fn s2v_compression_ratio() -> Arc<dyn Fn(&str) -> Option<f32> + Send + Sync>
 /// `0.0` will be formatted as `-inf`. Avoids returning negative zero values to make sure
 /// string->value->string roundtrips work correctly. Otherwise `-0.001` rounded to two digits
 /// would result in `-0.00`.
-pub fn v2s_f32_gain_to_db(digits: usize) -> Arc<dyn Fn(f32) -> String + Send + Sync> {
-    let rounding_multiplier = 10u32.pow(digits as u32) as f32;
+pub fn v2s_sample_gain_to_db<S: Sample>(digits: usize) -> Arc<dyn Fn(S) -> String + Send + Sync> {
+    let rounding_multiplier = S::from_p(10u32.pow(digits as u32));
     Arc::new(move |value| {
-        if value < util::MINUS_INFINITY_GAIN {
+        if value < S::MINUS_INFINITY_GAIN {
             String::from("-inf")
         } else {
             let value_db = util::gain_to_db(value);
 
             // See above
-            if (value_db * rounding_multiplier).round() / rounding_multiplier == 0.0 {
+            if (value_db * rounding_multiplier).round() / rounding_multiplier == S::ZERO {
                 format!("{:.digits$}", 0.0)
             } else {
                 format!("{value_db:.digits$}")
@@ -101,13 +102,13 @@ pub fn v2s_f32_gain_to_db(digits: usize) -> Arc<dyn Fn(f32) -> String + Send + S
 }
 
 /// Parse a decibel value to a linear voltage gain ratio. Handles the `dB` or `dBFS` units for you.
-/// Used in conjunction with [`v2s_f32_gain_to_db()`]. `-inf dB` will be parsed to 0.0.
-pub fn s2v_f32_gain_to_db() -> Arc<dyn Fn(&str) -> Option<f32> + Send + Sync> {
+/// Used in conjunction with [`v2s_sample_gain_to_db()`]. `-inf dB` will be parsed to 0.0.
+pub fn s2v_sample_gain_to_db<S: Sample>() -> Arc<dyn Fn(&str) -> Option<S> + Send + Sync> {
     Arc::new(|string| {
         let string = string.trim_end_matches(&[' ', 'd', 'D', 'b', 'B', 'f', 'F', 's', 'S']);
         // NOTE: The above line strips the `f`, so checked for `-inf` here will always return false
         if string.eq_ignore_ascii_case("-in") {
-            Some(0.0)
+            Some(S::ZERO)
         } else {
             string.parse().ok().map(util::db_to_gain)
         }
@@ -227,7 +228,7 @@ pub fn s2v_f32_hz_then_khz() -> Arc<dyn Fn(&str) -> Option<f32> + Send + Sync> {
                 note_formatter(midi_note_number_str),
                 cents_str.parse::<i32>(),
             ) {
-                let plain_note_freq = util::f32_midi_note_to_freq(midi_note_number as f32);
+                let plain_note_freq = util::sample_midi_note_to_freq(midi_note_number as f32);
                 let cents_multiplier = 2.0f32.powf(cents as f32 / 100.0 / 12.0);
                 return Some(plain_note_freq * cents_multiplier);
             }
@@ -237,7 +238,7 @@ pub fn s2v_f32_hz_then_khz() -> Arc<dyn Fn(&str) -> Option<f32> + Send + Sync> {
             segments
         {
             if let Some(midi_note_number) = note_formatter(midi_note_number_str) {
-                return Some(util::f32_midi_note_to_freq(midi_note_number as f32));
+                return Some(util::sample_midi_note_to_freq(midi_note_number as f32));
             }
         }
 

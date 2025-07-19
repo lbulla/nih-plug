@@ -403,7 +403,7 @@ impl Default for MyPlugin {
             params: Arc::new(MyPluginParams::default()),
 
             peak_meter_decay_weight: 1.0,
-            peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
+            peak_meter: Arc::new(AtomicF32::new(<f32 as Sample>::MINUS_INFINITY_DB)),
         }
     }
 }
@@ -425,8 +425,8 @@ impl Default for MyPluginParams {
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
             .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             some_int: IntParam::new("Something", 3, IntRange::Linear { min: 0, max: 3 }),
         }
     }

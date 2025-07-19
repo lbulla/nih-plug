@@ -111,6 +111,7 @@ mod event_loop;
 pub mod midi;
 pub mod params;
 pub mod plugin;
+mod sample;
 pub mod wrapper;
 
 // This is also re-exported from the prelude but since the other export entry points are macros and

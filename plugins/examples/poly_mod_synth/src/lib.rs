@@ -71,11 +71,11 @@ struct Voice {
     /// terminated when the amplitude envelope hits 0 while the note is releasing.
     releasing: bool,
     /// Fades between 0 and 1 with timings based on the global attack and release settings.
-    amp_envelope: Smoother<f32>,
+    amp_envelope: Smoother<f32, f32>,
 
     /// If this voice has polyphonic gain modulation applied, then this contains the normalized
     /// offset and a smoother.
-    voice_gain: Option<(f32, Smoother<f32>)>,
+    voice_gain: Option<(f32, Smoother<f32, f32>)>,
 }
 
 impl Default for PolyModSynth {
@@ -109,8 +109,8 @@ impl Default for PolyModSynthParams {
             .with_poly_modulation_id(GAIN_POLY_MOD_ID)
             .with_smoother(SmoothingStyle::Logarithmic(5.0))
             .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             amp_attack_ms: FloatParam::new(
                 "Attack",
                 200.0,
@@ -228,7 +228,8 @@ impl Plugin for PolyModSynth {
                                     self.start_voice(context, timing, voice_id, channel, note);
                                 voice.velocity_sqrt = velocity.sqrt();
                                 voice.phase = initial_phase;
-                                voice.phase_delta = util::midi_note_to_freq(note) / sample_rate;
+                                voice.phase_delta =
+                                    util::midi_note_to_freq::<f32>(note) / sample_rate;
                                 voice.amp_envelope = amp_envelope;
                             }
                             NoteEvent::NoteOff {

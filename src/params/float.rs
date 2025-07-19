@@ -31,7 +31,7 @@ pub struct FloatParam {
     default: f32,
     /// An optional smoother that will automatically interpolate between the new automation values
     /// set by the host.
-    pub smoothed: Smoother<f32>,
+    pub smoothed: Smoother<f32, f32>,
 
     /// Flags to control the parameter's behavior. See [`ParamFlags`].
     flags: ParamFlags,
@@ -46,7 +46,7 @@ pub struct FloatParam {
     value_changed: Option<Arc<dyn Fn(f32) + Send + Sync>>,
 
     /// The distribution of the parameter's values.
-    range: FloatRange,
+    range: FloatRange<f32>,
     /// The distance between discrete steps in this parameter. Mostly useful for quantizing GUI
     /// input. If this is set and if [`value_to_string`][Self::value_to_string] is not set, then
     /// this is also used when formatting the parameter. This must be a positive, nonzero number.
@@ -268,7 +268,7 @@ impl ParamMut for FloatParam {
 impl FloatParam {
     /// Build a new [`FloatParam`]. Use the other associated functions to modify the behavior of the
     /// parameter.
-    pub fn new(name: impl Into<String>, default: f32, range: FloatRange) -> Self {
+    pub fn new(name: impl Into<String>, default: f32, range: FloatRange<f32>) -> Self {
         range.assert_validity();
 
         Self {
@@ -302,7 +302,7 @@ impl FloatParam {
 
     /// The range of valid plain values for this parameter.
     #[inline]
-    pub fn range(&self) -> FloatRange {
+    pub fn range(&self) -> FloatRange<f32> {
         self.range
     }
 
@@ -325,7 +325,7 @@ impl FloatParam {
 
     /// Set up a smoother that can gradually interpolate changes made to this parameter, preventing
     /// clicks and zipper noises.
-    pub fn with_smoother(mut self, style: SmoothingStyle) -> Self {
+    pub fn with_smoother(mut self, style: SmoothingStyle<f32>) -> Self {
         // Logarithmic smoothing will cause problems if the range goes through zero since then you
         // end up multiplying by zero
         let goes_through_zero = match (&style, &self.range) {

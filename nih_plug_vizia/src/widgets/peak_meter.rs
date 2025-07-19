@@ -1,6 +1,6 @@
 //! A super simple peak meter widget.
 
-use nih_plug::prelude::util;
+use nih_plug::prelude::Sample;
 use std::cell::Cell;
 use std::time::Duration;
 use std::time::Instant;
@@ -67,7 +67,7 @@ impl PeakMeter {
 
                         peak_level
                     }
-                    None => util::MINUS_INFINITY_DB,
+                    None => <f32 as Sample>::MINUS_INFINITY_DB,
                 }
             });
 

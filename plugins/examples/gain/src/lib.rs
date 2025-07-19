@@ -82,8 +82,8 @@ impl Default for GainParams {
             // There are many predefined formatters we can use here. If the gain was stored as
             // decibels instead of as a linear gain value, we could have also used the
             // `.with_step_size(0.1)` function to get internal rounding.
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            .with_value_to_string(formatters::v2s_sample_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_sample_gain_to_db()),
             // Persisted fields can be initialized like any other fields, and they'll keep their
             // values when restoring the plugin's state.
             random_data: Mutex::new(Vec::new()),

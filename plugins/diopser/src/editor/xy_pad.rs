@@ -41,7 +41,7 @@ pub struct XyPad {
     /// The same range as that used by the filter frequency parameter. This is used to snap to
     /// frequencies when holding Alt while dragging.
     /// NOTE: This is hardcoded to work with the filter frequency parameter.
-    frequency_range: FloatRange,
+    frequency_range: FloatRange<f32>,
     /// Renormalizes the x-parameter's normalized value to a `[0, 1]` value that is used to display
     /// the parameter. This range may end up zooming in on a part of the parameter's original range
     /// when safe mode is enabled.
@@ -322,7 +322,7 @@ impl XyPad {
 
             let fractional_note = nih_plug::util::freq_to_midi_note(x_freq);
             let note = fractional_note.round();
-            let note_freq = nih_plug::util::f32_midi_note_to_freq(note);
+            let note_freq = nih_plug::util::sample_midi_note_to_freq(note);
 
             x_value = self.frequency_range.normalize(note_freq);
         }

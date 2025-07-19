@@ -34,7 +34,7 @@ pub use crate::midi::{control_change, MidiConfig, NoteEvent, PluginNoteEvent};
 pub use crate::params::enums::{Enum, EnumParam};
 pub use crate::params::internals::ParamPtr;
 pub use crate::params::range::{FloatRange, IntRange};
-pub use crate::params::smoothing::{AtomicF32, Smoothable, Smoother, SmoothingStyle};
+pub use crate::params::smoothing::{Smoother, SmoothingStyle};
 pub use crate::params::Params;
 pub use crate::params::{BoolParam, FloatParam, IntParam, Param, ParamFlags};
 #[cfg(all(feature = "au", target_os = "macos"))]
@@ -44,6 +44,7 @@ pub use crate::plugin::clap::{ClapPlugin, PolyModulationConfig};
 #[cfg(feature = "vst3")]
 pub use crate::plugin::vst3::Vst3Plugin;
 pub use crate::plugin::{Plugin, ProcessStatus, TaskExecutor};
+pub use crate::sample::{AtomicF32, AtomicF64, FromPrimitive, Sample, Smoothable, ToPrimitive};
 #[cfg(feature = "clap")]
 pub use crate::wrapper::clap::features::ClapFeature;
 pub use crate::wrapper::state::PluginState;

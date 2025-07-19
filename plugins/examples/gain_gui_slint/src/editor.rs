@@ -1,6 +1,6 @@
 use atomic_refcell::AtomicRefCell;
 use instant::{Duration, Instant};
-use nih_plug::prelude::{AtomicF32, Editor, GuiContext, Param};
+use nih_plug::prelude::{AtomicF32, Editor, GuiContext, Param, Sample};
 use nih_plug::{nih_error, util};
 use nih_plug_slint::*;
 use std::sync::atomic::Ordering;
@@ -143,7 +143,7 @@ impl SlintEditor for GainEditorBuilder {
             let peak_meter = self.peak_meter.clone();
 
             let hold_time = Duration::from_millis(600);
-            let mut hold_db = util::MINUS_INFINITY_DB;
+            let mut hold_db = <f32 as Sample>::MINUS_INFINITY_DB;
             let mut last_hold_time = Instant::now();
 
             move || {
