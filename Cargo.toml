@@ -67,6 +67,7 @@ standalone = [
     "dep:jack",
     "dep:midir",
     "dep:rtrb",
+    "dep:muda",
 ]
 
 au = [
@@ -148,6 +149,7 @@ libc = "0.2.124"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.5.1", features = ["apple"], optional = true }
 core-foundation = "0.9.3"
+muda = { version = "0.17.1", optional = true }
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", features = [
     "NSEvent",

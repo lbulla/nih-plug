@@ -119,3 +119,7 @@ pub mod wrapper;
 // symmetry and also export this function in the same places
 #[cfg(feature = "standalone")]
 pub use wrapper::standalone::nih_export_standalone;
+
+// Re-export for setting `AboutMetadata`.
+#[cfg(all(feature = "standalone", target_os = "macos"))]
+pub use muda;

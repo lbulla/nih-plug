@@ -47,11 +47,14 @@ mod wrapper;
 ///
 /// If the wrapped plugin fails to initialize or throws an error during audio processing, then this
 /// function will return `false`.
+///
+/// On macOS, a default app menu is created. Use [`nih_export_standalone_with_args_and_about`] to
+/// set the metadata for the about box.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn nih_export_standalone<P: Plugin>() -> bool {
     // TODO: If the backend fails to initialize then the standalones will exit normally instead of
     //       with an error code. This should probably be changed.
-    return nih_export_standalone_with_args::<P, _>(std::env::args());
+    nih_export_standalone_internal::<P, _>(std::env::args(), None)
 }
 
 /// The same as [`nih_export_standalone()`], but with the arguments taken from an iterator instead
@@ -60,7 +63,28 @@ pub fn nih_export_standalone<P: Plugin>() -> bool {
 pub fn nih_export_standalone_with_args<P: Plugin, Args: IntoIterator<Item = String>>(
     args: Args,
 ) -> bool {
+    nih_export_standalone_internal::<P, _>(args, None)
+}
+
+/// The same as [`nih_export_standalone_with_args()`], but with [`muda::AboutMetadata`] to set the
+/// metadata for the about box of the default app menu.
+#[cfg(all(target_os = "macos", not(target_arch = "wasm32")))]
+pub fn nih_export_standalone_with_args_and_about<P: Plugin, Args: IntoIterator<Item = String>>(
+    args: Args,
+    about_metadata: muda::AboutMetadata,
+) -> bool {
+    nih_export_standalone_internal::<P, _>(args, Some(about_metadata))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn nih_export_standalone_internal<P: Plugin, Args: IntoIterator<Item = String>>(
+    args: Args,
+    #[cfg(target_os = "macos")] about_metadata: Option<muda::AboutMetadata>,
+) -> bool {
     setup_logger();
+
+    #[cfg(target_os = "macos")]
+    let _menu_bar = create_default_app_menu::<P>(about_metadata);
 
     // Instead of parsing this directly, we need to take a bit of a roundabout approach to get the
     // plugin's name and vendor in here since they'd otherwise be taken from NIH-plug's own
@@ -169,6 +193,34 @@ pub fn nih_export_standalone_with_args<P: Plugin, Args: IntoIterator<Item = Stri
             run_wrapper::<P, _>(backend::Dummy::new::<P>(config.clone()), config)
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+fn create_default_app_menu<P: Plugin>(about_metadata: Option<muda::AboutMetadata>) -> muda::Menu {
+    let menu_bar = muda::Menu::new();
+    let app_menu = muda::Submenu::new("App", true);
+    let result = menu_bar.append(&app_menu).and_then(|_| {
+        app_menu.append_items(&[
+            &muda::PredefinedMenuItem::about(
+                Some(format!("&About {}", P::NAME).as_str()),
+                about_metadata,
+            ),
+            &muda::PredefinedMenuItem::separator(),
+            &muda::PredefinedMenuItem::services(None),
+            &muda::PredefinedMenuItem::separator(),
+            &muda::PredefinedMenuItem::hide(None),
+            &muda::PredefinedMenuItem::hide_others(None),
+            &muda::PredefinedMenuItem::show_all(None),
+            &muda::PredefinedMenuItem::separator(),
+            &muda::PredefinedMenuItem::quit(None),
+        ])
+    });
+    if let Err(err) = result {
+        nih_error!("Could not initialize the app menu: {err}");
+    }
+    menu_bar.init_for_nsapp();
+    menu_bar
 }
 
 #[cfg(target_arch = "wasm32")]
